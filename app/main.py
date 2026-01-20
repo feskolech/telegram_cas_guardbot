@@ -50,6 +50,7 @@ async def main():
     dp.workflow_data["update_export_interval_sec"] = cfg.update_export_interval_sec
     dp.workflow_data["update_lols_interval_sec"] = cfg.update_lols_interval_sec
     dp.workflow_data["seen_ttl_days"] = cfg.seen_ttl_days
+    dp.workflow_data["cas_cache_ttl_sec"] = cfg.cas_cache_ttl_sec
 
     async def task_refresh_sources():
         try:
@@ -74,9 +75,18 @@ async def main():
                 if await db.is_actioned(chat_id, user_id):
                     continue
 
-                flagged = local_db.contains(user_id) or await cas.is_banned(user_id)
+                flagged = local_db.contains(user_id)
                 if not flagged:
-                    continue
+                    cached = await db.get_cas_cache(chat_id, user_id)
+                    if cached:
+                        last_ts, is_banned = cached
+                        if now - last_ts < cfg.cas_cache_ttl_sec:
+                            flagged = bool(is_banned)
+                    if not flagged:
+                        flagged = await cas.is_banned(user_id)
+                        await db.set_cas_cache(chat_id, user_id, flagged)
+                        if not flagged:
+                            continue
 
                 mode = await db.get_mode(chat_id)
 

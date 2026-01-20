@@ -42,13 +42,30 @@ async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     m = await bot.get_chat_member(chat_id, user_id)
     return m.status in ("administrator", "creator")
 
-async def check_user(user_id: int, local_db: LocalScamDB, cas: CASClient) -> tuple[bool, str]:
+async def check_user(
+    chat_id: int,
+    user_id: int,
+    local_db: LocalScamDB,
+    cas: CASClient,
+    db: DB,
+    cache_ttl_sec: int,
+) -> tuple[bool, str]:
     """
     Returns (flagged, reason)
     """
     if local_db.contains(user_id):
         return True, "Local blacklist (CAS export / lols)"
-    if await cas.is_banned(user_id):
+
+    now = int(time.time())
+    cached = await db.get_cas_cache(chat_id, user_id)
+    if cached:
+        last_ts, is_banned = cached
+        if now - last_ts < cache_ttl_sec:
+            return (True, "CAS API (record found)") if is_banned else (False, "")
+
+    is_banned = await cas.is_banned(user_id)
+    await db.set_cas_cache(chat_id, user_id, is_banned)
+    if is_banned:
         return True, "CAS API (record found)"
     return False, ""
 
@@ -213,6 +230,7 @@ async def on_chat_member_update(
     local_db: LocalScamDB,
     cache_limit: int,
     banned_log_path: str,
+    cas_cache_ttl_sec: int,
 ):
     # user joined becomes member/restricted
     new_status = event.new_chat_member.status
@@ -231,7 +249,7 @@ async def on_chat_member_update(
     if await db.is_actioned(chat_id, user_id):
         return
 
-    flagged, reason = await check_user(user_id, local_db, cas)
+    flagged, reason = await check_user(chat_id, user_id, local_db, cas, db, cas_cache_ttl_sec)
     if not flagged:
         return
 
@@ -257,6 +275,7 @@ async def on_any_message(
     local_db: LocalScamDB,
     cache_limit: int,
     banned_log_path: str,
+    cas_cache_ttl_sec: int,
 ):
     chat_id = message.chat.id
     user_id = message.from_user.id
@@ -272,7 +291,7 @@ async def on_any_message(
     if await db.is_actioned(chat_id, user_id):
         return
 
-    flagged, reason = await check_user(user_id, local_db, cas)
+    flagged, reason = await check_user(chat_id, user_id, local_db, cas, db, cas_cache_ttl_sec)
     if not flagged:
         return
 

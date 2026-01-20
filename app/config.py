@@ -41,6 +41,7 @@ class Config:
     seen_ttl_days: int
 
     http_timeout_seconds: int
+    cas_cache_ttl_sec: int
 
 def load_config() -> Config:
     return Config(
@@ -56,4 +57,5 @@ def load_config() -> Config:
         seen_ttl_days=int(os.getenv("SEEN_TTL_DAYS", "7")),
 
         http_timeout_seconds=int(os.getenv("HTTP_TIMEOUT_SECONDS", "7")),
+        cas_cache_ttl_sec=parse_duration(os.getenv("CAS_CACHE_TTL", "10m")),
     )

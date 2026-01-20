@@ -49,11 +49,22 @@ CREATE TABLE IF NOT EXISTS action_log (
   ts INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS cas_cache (
+  chat_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  last_check_ts INTEGER NOT NULL,
+  is_banned INTEGER NOT NULL,
+  PRIMARY KEY (chat_id, user_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_msg_cache_chat_user_ts
 ON msg_cache(chat_id, user_id, ts);
 
 CREATE INDEX IF NOT EXISTS idx_action_log_chat_ts
 ON action_log(chat_id, ts);
+
+CREATE INDEX IF NOT EXISTS idx_cas_cache_ts
+ON cas_cache(last_check_ts);
 """
 
 class DB:
@@ -126,6 +137,7 @@ class DB:
         assert self.conn
         await self.conn.execute("DELETE FROM seen_users WHERE last_seen_ts < ?", (min_ts,))
         await self.conn.execute("DELETE FROM acted_users WHERE action_ts < ?", (min_ts,))
+        await self.conn.execute("DELETE FROM cas_cache WHERE last_check_ts < ?", (min_ts,))
         await self.conn.commit()
 
     async def add_message_id(self, chat_id: int, user_id: int, message_id: int, limit: int):
@@ -216,3 +228,24 @@ class DB:
             int(row[2] or 0),
             int(row[3] or 0),
         )
+
+    async def get_cas_cache(self, chat_id: int, user_id: int) -> Optional[tuple[int, bool]]:
+        assert self.conn
+        cur = await self.conn.execute(
+            "SELECT last_check_ts, is_banned FROM cas_cache WHERE chat_id=? AND user_id=?",
+            (chat_id, user_id),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return None
+        return (int(row[0]), bool(row[1]))
+
+    async def set_cas_cache(self, chat_id: int, user_id: int, is_banned: bool):
+        assert self.conn
+        now = int(time.time())
+        await self.conn.execute(
+            "INSERT INTO cas_cache(chat_id, user_id, last_check_ts, is_banned) VALUES(?, ?, ?, ?) "
+            "ON CONFLICT(chat_id, user_id) DO UPDATE SET last_check_ts=excluded.last_check_ts, is_banned=excluded.is_banned",
+            (chat_id, user_id, now, int(is_banned)),
+        )
+        await self.conn.commit()

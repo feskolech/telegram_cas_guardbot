@@ -17,6 +17,7 @@ Anti-spam bot for Telegram groups with hybrid detection:
   - /status (bot status, mode, intervals, local DB size)
 - Stats:
   - /stats (24h / 7d / 30d counts)
+- CAS checks are cached for a short TTL to reduce API load.
 
 ## Requirements (Telegram)
 Bot must be admin with:
