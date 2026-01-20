@@ -283,7 +283,10 @@ def login(request: Request):
             return HTMLResponse("ADMIN_SESSION_SECRET is not set", status_code=503)
     if "token" in modes and not ADMIN_TOKEN:
         return HTMLResponse("ADMIN_TOKEN is not set", status_code=503)
-    query = urlencode({"next": request.query_params.get("next", "/")})
+    next_url = request.query_params.get("next", "/")
+    query = urlencode({"next": next_url})
+    error = (request.query_params.get("error") or "").strip()
+    error_msg = "Invalid token. Please try again." if error == "invalid_token" else ""
     auth_url = f"{ADMIN_PUBLIC_URL}/auth/telegram?{query}" if "telegram" in modes else ""
     html = f"""
 <!DOCTYPE html>
@@ -340,12 +343,18 @@ def login(request: Request):
       color: #9fb0c0;
       font-size: 14px;
     }}
+    .error {{
+      margin: 6px 0 12px;
+      color: #ff6b6b;
+      font-size: 13px;
+    }}
   </style>
 </head>
 <body>
   <div class="card">
     <h1>CAS Guard Admin</h1>
     <p>Choose a login method to access the dashboard.</p>
+    {f"<div class='error'>{error_msg}</div>" if error_msg else ""}
     {"""
     <form action="/auth/token" method="post">
       <input type="password" name="token" placeholder="Admin token" required>
@@ -411,7 +420,7 @@ async def auth_token(request: Request):
     form = await request.form()
     token = (form.get("token") or "").strip()
     if not token or token != ADMIN_TOKEN:
-        raise HTTPException(status_code=403, detail="Invalid token")
+        return RedirectResponse(url="/login?error=invalid_token", status_code=302)
     if not ADMIN_SESSION_SECRET:
         raise HTTPException(status_code=503, detail="ADMIN_SESSION_SECRET not set")
     issued_ts = int(time.time())
