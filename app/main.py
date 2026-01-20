@@ -76,17 +76,24 @@ async def main():
                     continue
 
                 flagged = local_db.contains(user_id)
+                source = "local" if flagged else ""
                 if not flagged:
                     cached = await db.get_cas_cache(chat_id, user_id)
                     if cached:
                         last_ts, is_banned = cached
                         if now - last_ts < cfg.cas_cache_ttl_sec:
                             flagged = bool(is_banned)
+                            source = "cas" if flagged else ""
                     if not flagged:
-                        flagged = await cas.is_banned(user_id)
+                        try:
+                            flagged = await cas.is_banned(user_id)
+                        except Exception as e:
+                            await db.add_error_log("cas", chat_id, user_id, f"{type(e).__name__}: {e}")
+                            continue
                         await db.set_cas_cache(chat_id, user_id, flagged)
                         if not flagged:
                             continue
+                        source = "cas"
 
                 mode = await db.get_mode(chat_id)
 
@@ -108,6 +115,7 @@ async def main():
                     full_name=full_name,
                     mode=mode,
                     reason=reason,
+                    source=source,
                     log_path=cfg.banned_log_path,
                     cache_limit=cfg.message_cache_limit,
                 )

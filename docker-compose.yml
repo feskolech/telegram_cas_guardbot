@@ -6,3 +6,15 @@ services:
     volumes:
       - ./data:/data
     restart: unless-stopped
+  admin:
+    build: .
+    command: ["python", "-m", "admin.main"]
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
+    ports:
+      - "9005:9005"
+    restart: unless-stopped
+    profiles:
+      - admin

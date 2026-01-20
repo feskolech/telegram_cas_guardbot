@@ -18,6 +18,7 @@ Anti-spam bot for Telegram groups with hybrid detection:
 - Stats:
   - /stats (24h / 7d / 30d counts)
 - CAS checks are cached for a short TTL to reduce API load.
+- Optional admin dashboard (read-only) with per-chat stats and recent actions.
 
 ## Requirements (Telegram)
 Bot must be admin with:
@@ -30,6 +31,48 @@ BotFather -> /setprivacy -> Disable
 ## Run (Docker)
 1) Copy `.env.example` to `.env`, set BOT_TOKEN
 2) `docker compose up -d --build`
+
+### Admin dashboard (optional)
+1) Set in `.env`:
+   - `ADMIN_ENABLED=true`
+   - `ADMIN_AUTH_MODE=token|telegram|both`
+   - `ADMIN_TOKEN=...` (Bearer token, required for token mode)
+   - `ADMIN_PORT=9005`
+2) Start with profile:
+   - `docker compose --profile admin up -d --build`
+3) Open: `http://<host>:9005/`
+   - Send header: `Authorization: Bearer <ADMIN_TOKEN>`
+
+#### Telegram login (optional)
+If `ADMIN_AUTH_MODE` includes `telegram`:
+1) Set in `.env`:
+   - `ADMIN_PUBLIC_URL=https://your-domain`
+   - `ADMIN_TELEGRAM_BOT_USERNAME=your_bot_username`
+   - `ADMIN_TELEGRAM_BOT_TOKEN=` (optional, defaults to `BOT_TOKEN`)
+   - `ADMIN_TELEGRAM_IDS=123,456` (allowed Telegram user IDs)
+   - `ADMIN_SESSION_SECRET=...`
+2) In BotFather, set domain: `/setdomain` to your `ADMIN_PUBLIC_URL` host.
+3) Open `https://your-domain/login` and authenticate.
+
+### Backup / Restore
+The bot uses SQLite stored in `./data/bot.sqlite3`.
+
+Backup:
+```bash
+docker compose down
+tar -czf cas-guard-backup.tgz data/
+```
+
+Restore on a new server:
+1) Copy `cas-guard-backup.tgz` and the repo to the new server.
+2) Extract:
+```bash
+tar -xzf cas-guard-backup.tgz
+```
+3) Ensure `.env` is configured and start:
+```bash
+docker compose up -d --build
+```
 
 Logs:
 - SQLite: ./data/bot.sqlite3

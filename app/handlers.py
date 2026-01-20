@@ -49,25 +49,30 @@ async def check_user(
     cas: CASClient,
     db: DB,
     cache_ttl_sec: int,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, str]:
     """
-    Returns (flagged, reason)
+    Returns (flagged, reason, source)
     """
     if local_db.contains(user_id):
-        return True, "Local blacklist (CAS export / lols)"
+        return True, "Local blacklist (CAS export / lols)", "local"
 
     now = int(time.time())
     cached = await db.get_cas_cache(chat_id, user_id)
     if cached:
         last_ts, is_banned = cached
         if now - last_ts < cache_ttl_sec:
-            return (True, "CAS API (record found)") if is_banned else (False, "")
+            return (True, "CAS API (record found)", "cas") if is_banned else (False, "", "")
 
-    is_banned = await cas.is_banned(user_id)
+    try:
+        is_banned = await cas.is_banned(user_id)
+    except Exception as e:
+        await db.add_error_log("cas", chat_id, user_id, f"{type(e).__name__}: {e}")
+        return False, "", ""
+
     await db.set_cas_cache(chat_id, user_id, is_banned)
     if is_banned:
-        return True, "CAS API (record found)"
-    return False, ""
+        return True, "CAS API (record found)", "cas"
+    return False, "", ""
 
 async def act_on_spammer(
     bot: Bot,
@@ -77,6 +82,7 @@ async def act_on_spammer(
     full_name: str,
     mode: str,
     reason: str,
+    source: str,
     log_path: str,
     cache_limit: int,
 ):
@@ -91,40 +97,46 @@ async def act_on_spammer(
 
     if mode == MODE_NOTIFY:
         append_audit_line(log_path, chat_id, user_id, full_name, mode, reason, action="notify")
-        await db.add_action_log(chat_id, user_id, action="notify", mode=mode, reason=reason)
-        await bot.send_message(
-            chat_id,
-            msg_notify(full_name, user_id, reason),
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
+        await db.add_action_log(chat_id, user_id, action="notify", mode=mode, reason=reason, source=source)
+        try:
+            await bot.send_message(
+                chat_id,
+                msg_notify(full_name, user_id, reason),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        except TelegramBadRequest as e:
+            await db.add_error_log("telegram", chat_id, user_id, f"{type(e).__name__}: {e}")
         return
 
     # quickban
     append_audit_line(log_path, chat_id, user_id, full_name, mode, reason, action="quickban")
-    await db.add_action_log(chat_id, user_id, action="quickban", mode=mode, reason=reason)
+    await db.add_action_log(chat_id, user_id, action="quickban", mode=mode, reason=reason, source=source)
 
     try:
         await bot.ban_chat_member(chat_id, user_id)
-    except TelegramBadRequest:
-        pass
+    except TelegramBadRequest as e:
+        await db.add_error_log("telegram", chat_id, user_id, f"{type(e).__name__}: {e}")
 
     # delete cached messages
     msg_ids = await db.get_cached_messages(chat_id, user_id)
     for mid in msg_ids:
         try:
             await bot.delete_message(chat_id, mid)
-        except TelegramBadRequest:
-            pass
+        except TelegramBadRequest as e:
+            await db.add_error_log("telegram", chat_id, user_id, f"{type(e).__name__}: {e}")
 
     await db.clear_cached_messages(chat_id, user_id)
 
-    await bot.send_message(
-        chat_id,
-        msg_banned(full_name, user_id, reason),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
+    try:
+        await bot.send_message(
+            chat_id,
+            msg_banned(full_name, user_id, reason),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+    except TelegramBadRequest as e:
+        await db.add_error_log("telegram", chat_id, user_id, f"{type(e).__name__}: {e}")
 
 @router.message(Command("notify"))
 async def cmd_notify(message: Message, bot: Bot, db: DB):
@@ -240,6 +252,8 @@ async def on_chat_member_update(
 
     joining = event.new_chat_member.user
     chat_id = event.chat.id
+    if event.chat.title:
+        await db.upsert_chat_info(chat_id, event.chat.title)
     user_id = joining.id
     full_name = joining.full_name or str(user_id)
 
@@ -250,7 +264,7 @@ async def on_chat_member_update(
     if await db.is_actioned(chat_id, user_id):
         return
 
-    flagged, reason = await check_user(chat_id, user_id, local_db, cas, db, cas_cache_ttl_sec)
+    flagged, reason, source = await check_user(chat_id, user_id, local_db, cas, db, cas_cache_ttl_sec)
     if not flagged:
         return
 
@@ -263,6 +277,7 @@ async def on_chat_member_update(
         full_name=full_name,
         mode=mode,
         reason=reason,
+        source=source,
         log_path=banned_log_path,
         cache_limit=cache_limit,
     )
@@ -279,6 +294,8 @@ async def on_any_message(
     cas_cache_ttl_sec: int,
 ):
     chat_id = message.chat.id
+    if message.chat.title:
+        await db.upsert_chat_info(chat_id, message.chat.title)
     user_id = message.from_user.id
     full_name = message.from_user.full_name or str(user_id)
 
@@ -292,7 +309,7 @@ async def on_any_message(
     if await db.is_actioned(chat_id, user_id):
         return
 
-    flagged, reason = await check_user(chat_id, user_id, local_db, cas, db, cas_cache_ttl_sec)
+    flagged, reason, source = await check_user(chat_id, user_id, local_db, cas, db, cas_cache_ttl_sec)
     if not flagged:
         return
 
@@ -305,6 +322,7 @@ async def on_any_message(
         full_name=full_name,
         mode=mode,
         reason=reason,
+        source=source,
         log_path=banned_log_path,
         cache_limit=cache_limit,
     )

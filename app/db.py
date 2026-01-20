@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS seen_users (
   chat_id INTEGER NOT NULL,
   user_id INTEGER NOT NULL,
   last_seen_ts INTEGER NOT NULL,
+  first_seen_ts INTEGER NOT NULL,
   PRIMARY KEY (chat_id, user_id)
 );
 
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS action_log (
   action TEXT NOT NULL,
   mode TEXT NOT NULL,
   reason TEXT NOT NULL,
+  source TEXT NOT NULL,
   ts INTEGER NOT NULL
 );
 
@@ -57,6 +59,21 @@ CREATE TABLE IF NOT EXISTS cas_cache (
   PRIMARY KEY (chat_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS chat_info (
+  chat_id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  updated_ts INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS error_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source TEXT NOT NULL,
+  chat_id INTEGER,
+  user_id INTEGER,
+  message TEXT NOT NULL,
+  ts INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_msg_cache_chat_user_ts
 ON msg_cache(chat_id, user_id, ts);
 
@@ -65,6 +82,9 @@ ON action_log(chat_id, ts);
 
 CREATE INDEX IF NOT EXISTS idx_cas_cache_ts
 ON cas_cache(last_check_ts);
+
+CREATE INDEX IF NOT EXISTS idx_error_log_ts
+ON error_log(ts);
 """
 
 class DB:
@@ -75,11 +95,28 @@ class DB:
     async def open(self):
         self.conn = await aiosqlite.connect(self.path)
         await self.conn.executescript(SCHEMA)
+        await self._migrate()
         await self.conn.commit()
 
     async def close(self):
         if self.conn:
             await self.conn.close()
+
+    async def _migrate(self):
+        assert self.conn
+        await self._ensure_column("seen_users", "first_seen_ts", "INTEGER")
+        await self.conn.execute(
+            "UPDATE seen_users SET first_seen_ts=last_seen_ts WHERE first_seen_ts IS NULL"
+        )
+        await self._ensure_column("action_log", "source", "TEXT NOT NULL DEFAULT 'unknown'")
+        await self.conn.commit()
+
+    async def _ensure_column(self, table: str, column: str, ddl: str):
+        assert self.conn
+        cur = await self.conn.execute(f"PRAGMA table_info({table})")
+        cols = [row[1] for row in await cur.fetchall()]
+        if column not in cols:
+            await self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
     async def get_mode(self, chat_id: int) -> str:
         assert self.conn
@@ -116,9 +153,9 @@ class DB:
         assert self.conn
         now = int(time.time())
         await self.conn.execute(
-            "INSERT INTO seen_users(chat_id, user_id, last_seen_ts) VALUES(?, ?, ?) "
+            "INSERT INTO seen_users(chat_id, user_id, last_seen_ts, first_seen_ts) VALUES(?, ?, ?, ?) "
             "ON CONFLICT(chat_id, user_id) DO UPDATE SET last_seen_ts=excluded.last_seen_ts",
-            (chat_id, user_id, now),
+            (chat_id, user_id, now, now),
         )
         await self.conn.commit()
 
@@ -205,12 +242,12 @@ class DB:
         await self.conn.commit()
         return bool(row and row[0] == 1)
 
-    async def add_action_log(self, chat_id: int, user_id: int, action: str, mode: str, reason: str):
+    async def add_action_log(self, chat_id: int, user_id: int, action: str, mode: str, reason: str, source: str):
         assert self.conn
         now = int(time.time())
         await self.conn.execute(
-            "INSERT INTO action_log(chat_id, user_id, action, mode, reason, ts) VALUES(?, ?, ?, ?, ?, ?)",
-            (chat_id, user_id, action, mode, reason, now),
+            "INSERT INTO action_log(chat_id, user_id, action, mode, reason, source, ts) VALUES(?, ?, ?, ?, ?, ?, ?)",
+            (chat_id, user_id, action, mode, reason, source, now),
         )
         await self.conn.commit()
 
@@ -240,6 +277,25 @@ class DB:
             int(row[2] or 0),
             int(row[3] or 0),
         )
+
+    async def add_error_log(self, source: str, chat_id: int | None, user_id: int | None, message: str):
+        assert self.conn
+        now = int(time.time())
+        await self.conn.execute(
+            "INSERT INTO error_log(source, chat_id, user_id, message, ts) VALUES(?, ?, ?, ?, ?)",
+            (source, chat_id, user_id, message, now),
+        )
+        await self.conn.commit()
+
+    async def upsert_chat_info(self, chat_id: int, title: str):
+        assert self.conn
+        now = int(time.time())
+        await self.conn.execute(
+            "INSERT INTO chat_info(chat_id, title, updated_ts) VALUES(?, ?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title, updated_ts=excluded.updated_ts",
+            (chat_id, title, now),
+        )
+        await self.conn.commit()
 
     async def get_cas_cache(self, chat_id: int, user_id: int) -> Optional[tuple[int, bool]]:
         assert self.conn
