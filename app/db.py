@@ -1,0 +1,218 @@
+import aiosqlite
+import time
+from typing import Optional
+
+MODE_NOTIFY = "notify"
+MODE_QUICKBAN = "quickban"
+
+SCHEMA = """
+PRAGMA journal_mode=WAL;
+
+CREATE TABLE IF NOT EXISTS chat_settings (
+  chat_id INTEGER PRIMARY KEY,
+  mode TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS whitelist (
+  chat_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  PRIMARY KEY (chat_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS seen_users (
+  chat_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  last_seen_ts INTEGER NOT NULL,
+  PRIMARY KEY (chat_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS msg_cache (
+  chat_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  message_id INTEGER NOT NULL,
+  ts INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS acted_users (
+  chat_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  action_ts INTEGER NOT NULL,
+  PRIMARY KEY (chat_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS action_log (
+  chat_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  action TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  ts INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_msg_cache_chat_user_ts
+ON msg_cache(chat_id, user_id, ts);
+
+CREATE INDEX IF NOT EXISTS idx_action_log_chat_ts
+ON action_log(chat_id, ts);
+"""
+
+class DB:
+    def __init__(self, path: str):
+        self.path = path
+        self.conn: Optional[aiosqlite.Connection] = None
+
+    async def open(self):
+        self.conn = await aiosqlite.connect(self.path)
+        await self.conn.executescript(SCHEMA)
+        await self.conn.commit()
+
+    async def close(self):
+        if self.conn:
+            await self.conn.close()
+
+    async def get_mode(self, chat_id: int) -> str:
+        assert self.conn
+        cur = await self.conn.execute("SELECT mode FROM chat_settings WHERE chat_id=?", (chat_id,))
+        row = await cur.fetchone()
+        return row[0] if row else MODE_QUICKBAN
+
+    async def set_mode(self, chat_id: int, mode: str):
+        assert self.conn
+        await self.conn.execute(
+            "INSERT INTO chat_settings(chat_id, mode) VALUES(?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET mode=excluded.mode",
+            (chat_id, mode),
+        )
+        await self.conn.commit()
+
+    async def is_whitelisted(self, chat_id: int, user_id: int) -> bool:
+        assert self.conn
+        cur = await self.conn.execute(
+            "SELECT 1 FROM whitelist WHERE chat_id=? AND user_id=?",
+            (chat_id, user_id),
+        )
+        return (await cur.fetchone()) is not None
+
+    async def add_whitelist(self, chat_id: int, user_id: int):
+        assert self.conn
+        await self.conn.execute(
+            "INSERT OR IGNORE INTO whitelist(chat_id, user_id) VALUES(?, ?)",
+            (chat_id, user_id),
+        )
+        await self.conn.commit()
+
+    async def touch_seen(self, chat_id: int, user_id: int):
+        assert self.conn
+        now = int(time.time())
+        await self.conn.execute(
+            "INSERT INTO seen_users(chat_id, user_id, last_seen_ts) VALUES(?, ?, ?) "
+            "ON CONFLICT(chat_id, user_id) DO UPDATE SET last_seen_ts=excluded.last_seen_ts",
+            (chat_id, user_id, now),
+        )
+        await self.conn.commit()
+
+    async def list_seen_users(self, min_ts: int) -> list[tuple[int, int, int]]:
+        """
+        Returns list of (chat_id, user_id, last_seen_ts)
+        """
+        assert self.conn
+        cur = await self.conn.execute(
+            "SELECT chat_id, user_id, last_seen_ts FROM seen_users WHERE last_seen_ts>=?",
+            (min_ts,),
+        )
+        return await cur.fetchall()
+
+    async def prune_seen_users(self, min_ts: int):
+        assert self.conn
+        await self.conn.execute("DELETE FROM seen_users WHERE last_seen_ts < ?", (min_ts,))
+        await self.conn.execute("DELETE FROM acted_users WHERE action_ts < ?", (min_ts,))
+        await self.conn.commit()
+
+    async def add_message_id(self, chat_id: int, user_id: int, message_id: int, limit: int):
+        assert self.conn
+        now = int(time.time())
+        await self.conn.execute(
+            "INSERT INTO msg_cache(chat_id, user_id, message_id, ts) VALUES(?, ?, ?, ?)",
+            (chat_id, user_id, message_id, now),
+        )
+        # enforce limit per (chat,user): delete older extra
+        await self.conn.execute(
+            """
+            DELETE FROM msg_cache
+            WHERE rowid IN (
+              SELECT rowid FROM msg_cache
+              WHERE chat_id=? AND user_id=?
+              ORDER BY ts DESC
+              LIMIT -1 OFFSET ?
+            )
+            """,
+            (chat_id, user_id, limit),
+        )
+        await self.conn.commit()
+
+    async def get_cached_messages(self, chat_id: int, user_id: int) -> list[int]:
+        assert self.conn
+        cur = await self.conn.execute(
+            "SELECT message_id FROM msg_cache WHERE chat_id=? AND user_id=? ORDER BY ts DESC",
+            (chat_id, user_id),
+        )
+        rows = await cur.fetchall()
+        return [r[0] for r in rows]
+
+    async def clear_cached_messages(self, chat_id: int, user_id: int):
+        assert self.conn
+        await self.conn.execute("DELETE FROM msg_cache WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+        await self.conn.commit()
+
+    async def is_actioned(self, chat_id: int, user_id: int) -> bool:
+        assert self.conn
+        cur = await self.conn.execute(
+            "SELECT 1 FROM acted_users WHERE chat_id=? AND user_id=?",
+            (chat_id, user_id),
+        )
+        return (await cur.fetchone()) is not None
+
+    async def mark_actioned(self, chat_id: int, user_id: int):
+        assert self.conn
+        now = int(time.time())
+        await self.conn.execute(
+            "INSERT OR IGNORE INTO acted_users(chat_id, user_id, action_ts) VALUES(?, ?, ?)",
+            (chat_id, user_id, now),
+        )
+        await self.conn.commit()
+
+    async def add_action_log(self, chat_id: int, user_id: int, action: str, mode: str, reason: str):
+        assert self.conn
+        now = int(time.time())
+        await self.conn.execute(
+            "INSERT INTO action_log(chat_id, user_id, action, mode, reason, ts) VALUES(?, ?, ?, ?, ?, ?)",
+            (chat_id, user_id, action, mode, reason, now),
+        )
+        await self.conn.commit()
+
+    async def get_action_stats(self, chat_id: int, since_ts: int) -> tuple[int, int, int, int]:
+        """
+        Returns: (total, notify_count, quickban_count, unique_users)
+        """
+        assert self.conn
+        cur = await self.conn.execute(
+            """
+            SELECT
+              COUNT(*) AS total,
+              SUM(CASE WHEN action='notify' THEN 1 ELSE 0 END) AS notify_count,
+              SUM(CASE WHEN action='quickban' THEN 1 ELSE 0 END) AS quickban_count,
+              COUNT(DISTINCT user_id) AS unique_users
+            FROM action_log
+            WHERE chat_id=? AND ts>=?
+            """,
+            (chat_id, since_ts),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return (0, 0, 0, 0)
+        return (
+            int(row[0] or 0),
+            int(row[1] or 0),
+            int(row[2] or 0),
+            int(row[3] or 0),
+        )
