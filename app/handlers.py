@@ -85,6 +85,9 @@ async def act_on_spammer(
         return
     if await db.is_actioned(chat_id, user_id):
         return
+    # atomic guard against parallel handlers
+    if not await db.try_mark_actioned(chat_id, user_id):
+        return
 
     if mode == MODE_NOTIFY:
         append_audit_line(log_path, chat_id, user_id, full_name, mode, reason, action="notify")
@@ -95,7 +98,6 @@ async def act_on_spammer(
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
-        await db.mark_actioned(chat_id, user_id)
         return
 
     # quickban
@@ -123,7 +125,6 @@ async def act_on_spammer(
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
-    await db.mark_actioned(chat_id, user_id)
 
 @router.message(Command("notify"))
 async def cmd_notify(message: Message, bot: Bot, db: DB):

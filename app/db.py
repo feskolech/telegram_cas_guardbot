@@ -193,6 +193,18 @@ class DB:
         )
         await self.conn.commit()
 
+    async def try_mark_actioned(self, chat_id: int, user_id: int) -> bool:
+        assert self.conn
+        now = int(time.time())
+        await self.conn.execute(
+            "INSERT OR IGNORE INTO acted_users(chat_id, user_id, action_ts) VALUES(?, ?, ?)",
+            (chat_id, user_id, now),
+        )
+        cur = await self.conn.execute("SELECT changes()")
+        row = await cur.fetchone()
+        await self.conn.commit()
+        return bool(row and row[0] == 1)
+
     async def add_action_log(self, chat_id: int, user_id: int, action: str, mode: str, reason: str):
         assert self.conn
         now = int(time.time())
