@@ -4,6 +4,10 @@ Anti-spam bot for Telegram groups with hybrid detection:
 - Local blacklists (CAS export.csv + lols.bot scammers.txt)
 - CAS API check on demand
 
+What are CAS and lols.bot?
+- CAS (Combot Anti-Spam) is a shared blacklist of known spam accounts.
+- lols.bot provides a public list of scammer IDs.
+
 ## Features
 - Per-chat modes:
   - /notify (report only)
