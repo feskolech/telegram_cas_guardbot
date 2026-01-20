@@ -1,4 +1,5 @@
 import hashlib
+import html
 import hmac
 import os
 import sqlite3
@@ -21,6 +22,9 @@ ADMIN_TELEGRAM_BOT_TOKEN = os.getenv("ADMIN_TELEGRAM_BOT_TOKEN", "").strip() or 
 ADMIN_SESSION_SECRET = os.getenv("ADMIN_SESSION_SECRET", "").strip() or ADMIN_TOKEN
 ADMIN_SESSION_TTL_SEC = int(os.getenv("ADMIN_SESSION_TTL_SEC", "43200"))
 ADMIN_PUBLIC_URL = os.getenv("ADMIN_PUBLIC_URL", "").strip().rstrip("/")
+ADMIN_TELEGRAM_AUTH_MAX_AGE_SEC = int(os.getenv("ADMIN_TELEGRAM_AUTH_MAX_AGE_SEC", "86400"))
+UPDATE_EXPORT_INTERVAL = os.getenv("UPDATE_EXPORT_INTERVAL", "30m")
+UPDATE_LOLS_INTERVAL = os.getenv("UPDATE_LOLS_INTERVAL", "30m")
 
 app = FastAPI()
 
@@ -70,6 +74,32 @@ def _connect():
 def _since(seconds: int) -> int:
     return int(time.time()) - seconds
 
+def _parse_duration(s: str) -> int:
+    s = (s or "").strip().lower()
+    if not s:
+        return 0
+    num = ""
+    unit = ""
+    for ch in s:
+        if ch.isdigit():
+            num += ch
+        else:
+            unit += ch
+    if not num or unit not in {"s", "m", "h", "d"}:
+        return 0
+    n = int(num)
+    mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+    return n * mult
+
+def _get_source_updates(conn: sqlite3.Connection) -> dict:
+    try:
+        cur = conn.execute(
+            "SELECT name, last_ts, count FROM source_updates"
+        )
+    except sqlite3.OperationalError:
+        return {}
+    rows = cur.fetchall()
+    return {r["name"]: {"last_ts": int(r["last_ts"]), "count": int(r["count"])} for r in rows}
 
 def _fmt_ts(ts: int | None) -> str:
     if not ts:
@@ -208,6 +238,65 @@ def _source_class(source: str) -> str:
 def healthz():
     return "ok"
 
+@app.get("/api/sources")
+def api_sources(request: Request):
+    _require_auth(request)
+    export_interval = _parse_duration(UPDATE_EXPORT_INTERVAL) or 1800
+    lols_interval = _parse_duration(UPDATE_LOLS_INTERVAL) or 1800
+    with _connect() as conn:
+        updates = _get_source_updates(conn)
+    def _pack(name: str, interval: int) -> dict:
+        row = updates.get(name)
+        last_ts = row["last_ts"] if row else None
+        count = row["count"] if row else None
+        next_ts = (last_ts + interval) if last_ts and interval else None
+        return {"last_ts": last_ts, "next_ts": next_ts, "count": count}
+    return {
+        "export": _pack("export", export_interval),
+        "lols": _pack("lols", lols_interval),
+        "total": _pack("total", 0),
+        "server_ts": int(time.time()),
+        "export_interval_sec": export_interval,
+        "lols_interval_sec": lols_interval,
+    }
+
+
+@app.get("/api/actions")
+def api_actions(request: Request):
+    _require_auth(request)
+    with _connect() as conn:
+        rows = _recent_actions(conn, limit=25)
+    return {
+        "items": [
+            {
+                "ts": int(r["ts"]),
+                "chat_id": int(r["chat_id"]),
+                "user_id": int(r["user_id"]),
+                "action": r["action"],
+                "source": r["source"],
+                "reason": r["reason"],
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/api/stats")
+def api_stats(request: Request):
+    _require_auth(request)
+    day = _since(86400)
+    week = _since(7 * 86400)
+    month = _since(30 * 86400)
+    with _connect() as conn:
+        global_day = _stats_all(conn, day)
+        global_week = _stats_all(conn, week)
+        global_month = _stats_all(conn, month)
+    return {
+        "day": global_day,
+        "week": global_week,
+        "month": global_month,
+    }
+
 
 def _parse_admin_ids(value: str) -> set[int]:
     out: set[int] = set()
@@ -266,6 +355,22 @@ def _verify_telegram_payload(payload: dict) -> bool:
     hmac_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
     return hmac.compare_digest(hmac_hash, check_hash)
 
+def _is_recent_auth_date(payload: dict) -> bool:
+    auth_date = payload.get("auth_date")
+    try:
+        auth_ts = int(auth_date)
+    except (TypeError, ValueError):
+        return False
+    now = int(time.time())
+    return (now - auth_ts) <= ADMIN_TELEGRAM_AUTH_MAX_AGE_SEC
+
+def _safe_next(value: str) -> str:
+    if not value or not value.startswith("/") or value.startswith("//") or "://" in value:
+        return "/"
+    return value
+
+def _esc(value: object) -> str:
+    return html.escape(str(value), quote=True)
 
 @app.get("/login", response_class=HTMLResponse)
 def login(request: Request):
@@ -281,9 +386,11 @@ def login(request: Request):
             return HTMLResponse("ADMIN_PUBLIC_URL is not set", status_code=503)
         if not ADMIN_SESSION_SECRET:
             return HTMLResponse("ADMIN_SESSION_SECRET is not set", status_code=503)
+        if not ADMIN_TELEGRAM_IDS:
+            return HTMLResponse("ADMIN_TELEGRAM_IDS is not set", status_code=503)
     if "token" in modes and not ADMIN_TOKEN:
         return HTMLResponse("ADMIN_TOKEN is not set", status_code=503)
-    next_url = request.query_params.get("next", "/")
+    next_url = _safe_next(request.query_params.get("next", "/"))
     query = urlencode({"next": next_url})
     error = (request.query_params.get("error") or "").strip()
     error_msg = "Invalid token. Please try again." if error == "invalid_token" else ""
@@ -358,9 +465,10 @@ def login(request: Request):
     {"""
     <form action="/auth/token" method="post">
       <input type="password" name="token" placeholder="Admin token" required>
+      <input type="hidden" name="next" value="%s">
       <button type="submit">Login with token</button>
     </form>
-    """ if "token" in modes else ""}
+    """ % _esc(next_url) if "token" in modes else ""}
     {"""
     <script async src="https://telegram.org/js/telegram-widget.js?22"
       data-telegram-login="%s"
@@ -384,9 +492,13 @@ def auth_telegram(request: Request):
         raise HTTPException(status_code=404, detail="Telegram login disabled")
     if not ADMIN_SESSION_SECRET:
         raise HTTPException(status_code=503, detail="ADMIN_SESSION_SECRET not set")
+    if not ADMIN_TELEGRAM_IDS:
+        raise HTTPException(status_code=503, detail="ADMIN_TELEGRAM_IDS not set")
     payload = dict(request.query_params)
     if not _verify_telegram_payload(payload):
         raise HTTPException(status_code=403, detail="Invalid auth payload")
+    if not _is_recent_auth_date(payload):
+        raise HTTPException(status_code=403, detail="Expired auth payload")
     user_id = payload.get("id")
     if not user_id:
         raise HTTPException(status_code=400, detail="Missing id")
@@ -399,7 +511,8 @@ def auth_telegram(request: Request):
         raise HTTPException(status_code=403, detail="User not allowed")
     issued_ts = int(time.time())
     session_value = _sign_session(user_id_int, issued_ts)
-    resp = RedirectResponse(url=request.query_params.get("next", "/"), status_code=302)
+    next_url = _safe_next(request.query_params.get("next", "/"))
+    resp = RedirectResponse(url=next_url, status_code=302)
     resp.set_cookie(
         "admin_session",
         session_value,
@@ -425,7 +538,8 @@ async def auth_token(request: Request):
         raise HTTPException(status_code=503, detail="ADMIN_SESSION_SECRET not set")
     issued_ts = int(time.time())
     session_value = _sign_session(0, issued_ts)
-    resp = RedirectResponse(url="/", status_code=302)
+    next_url = _safe_next(form.get("next") or "/")
+    resp = RedirectResponse(url=next_url, status_code=302)
     resp.set_cookie(
         "admin_session",
         session_value,
@@ -470,6 +584,7 @@ def dashboard(request: Request):
 
         recent_actions = _recent_actions(conn, limit=25)
         recent_errors = _recent_errors(conn, limit=20)
+        source_updates = _get_source_updates(conn)
 
         per_chat = []
         for chat_id, title in chats:
@@ -631,7 +746,7 @@ def dashboard(request: Request):
   <header>
     <div>
       <h1>CAS Guard Admin</h1>
-      <div class="sub">Read-only dashboard · data source: {DB_PATH}</div>
+      <div class="sub">Read-only dashboard · data source: {_esc(DB_PATH)}</div>
     </div>
     <div class="actions">
       <button type="button" id="theme-toggle">Theme</button>
@@ -642,19 +757,30 @@ def dashboard(request: Request):
   <div class="grid">
     <div class="card">
       <h3>Last 24h</h3>
-      <div class="value">{_fmt_stats_line(global_day)}</div>
+      <div class="value" id="stats-day">{_fmt_stats_line(global_day)}</div>
     </div>
     <div class="card">
       <h3>Last 7d</h3>
-      <div class="value">{_fmt_stats_line(global_week)}</div>
+      <div class="value" id="stats-week">{_fmt_stats_line(global_week)}</div>
     </div>
     <div class="card">
       <h3>Last 30d</h3>
-      <div class="value">{_fmt_stats_line(global_month)}</div>
+      <div class="value" id="stats-month">{_fmt_stats_line(global_month)}</div>
     </div>
     <div class="card">
       <h3>Time To Action (7d)</h3>
       <div class="value">p50: {p50 or '-'}s · p95: {p95 or '-'}s</div>
+    </div>
+    <div class="card">
+      <h3>Sources</h3>
+      <div class="value" id="sources-meta">
+        Export: {_esc(_fmt_ts(source_updates.get("export", {}).get("last_ts")))}<br>
+        LOLS: {_esc(_fmt_ts(source_updates.get("lols", {}).get("last_ts")))}<br>
+        Total IDs: {_esc(source_updates.get("total", {}).get("count", "-"))}
+      </div>
+      <div class="muted" id="sources-next">
+        Next export: - · Next lols: -
+      </div>
     </div>
   </div>
 
@@ -673,7 +799,7 @@ def dashboard(request: Request):
       <tbody>
         {''.join(
             f"<tr><td><span class='pill'>{c['chat_id']}</span></td>"
-            f"<td class='muted'>{c['title']}</td>"
+            f"<td class='muted'>{_esc(c['title'])}</td>"
             f"<td>{_fmt_stats_line(c['day'])}</td>"
             f"<td>{_fmt_stats_line(c['week'])}</td>"
             f"<td>{_fmt_stats_line(c['month'])}</td></tr>"
@@ -696,15 +822,15 @@ def dashboard(request: Request):
           <th>Reason</th>
         </tr>
       </thead>
-      <tbody>
+      <tbody id="actions-body">
         {''.join(
             f"<tr>"
             f"<td class='muted'>{_fmt_ts(r['ts'])}</td>"
             f"<td>{r['chat_id']}</td>"
             f"<td>{r['user_id']}</td>"
-            f"<td>{r['action']}</td>"
-            f"<td class='{_source_class(r['source'] or 'unknown')}'>{r['source'] or 'unknown'}</td>"
-            f"<td class='muted'>{r['reason']}</td>"
+            f"<td>{_esc(r['action'])}</td>"
+            f"<td class='{_source_class(r['source'] or 'unknown')}'>{_esc(r['source'] or 'unknown')}</td>"
+            f"<td class='muted'>{_esc(r['reason'])}</td>"
             f"</tr>"
             for r in recent_actions
         )}
@@ -728,10 +854,10 @@ def dashboard(request: Request):
         {''.join(
             f"<tr>"
             f"<td class='muted'>{_fmt_ts(e['ts'])}</td>"
-            f"<td class='tag-err'>{e['source']}</td>"
+            f"<td class='tag-err'>{_esc(e['source'])}</td>"
             f"<td>{e['chat_id'] or '-'}</td>"
             f"<td>{e['user_id'] or '-'}</td>"
-            f"<td class='muted'>{e['message']}</td>"
+            f"<td class='muted'>{_esc(e['message'])}</td>"
             f"</tr>"
             for e in recent_errors
         )}
@@ -752,6 +878,93 @@ def dashboard(request: Request):
         localStorage.setItem(key, root.classList.contains("light") ? "light" : "dark");
       }});
     }})();
+
+    function fmtTs(ts) {{
+      if (!ts) return "-";
+      const d = new Date(ts * 1000);
+      return d.toISOString().replace("T", " ").slice(0, 19) + " UTC";
+    }}
+    function refreshSources() {{
+      fetch("/api/sources", {{ credentials: "same-origin" }})
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {{
+          if (!data) return;
+          const exportLast = fmtTs(data.export.last_ts);
+          const lolsLast = fmtTs(data.lols.last_ts);
+          const total = data.total.count ?? "-";
+          const exportNextTs = data.export.next_ts ?? (data.export.last_ts && data.export_interval_sec ? data.export.last_ts + data.export_interval_sec : null);
+          const lolsNextTs = data.lols.next_ts ?? (data.lols.last_ts && data.lols_interval_sec ? data.lols.last_ts + data.lols_interval_sec : null);
+          const exportNext = fmtTs(exportNextTs);
+          const lolsNext = fmtTs(lolsNextTs);
+          const meta = document.getElementById("sources-meta");
+          const next = document.getElementById("sources-next");
+          if (meta) {{
+            meta.innerHTML = "Export: " + exportLast + "<br>LOLS: " + lolsLast + "<br>Total IDs: " + total;
+          }}
+          if (next) {{
+            next.innerHTML = "Next export: " + exportNext + "<br>Next lols: " + lolsNext;
+          }}
+        }})
+        .catch(() => {{}});
+    }}
+    function refreshStats() {{
+      fetch("/api/stats", {{ credentials: "same-origin" }})
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {{
+          if (!data) return;
+          const day = document.getElementById("stats-day");
+          const week = document.getElementById("stats-week");
+          const month = document.getElementById("stats-month");
+          if (day) day.textContent = fmtStats(data.day);
+          if (week) week.textContent = fmtStats(data.week);
+          if (month) month.textContent = fmtStats(data.month);
+        }})
+        .catch(() => {{}});
+    }}
+    function refreshActions() {{
+      fetch("/api/actions", {{ credentials: "same-origin" }})
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {{
+          if (!data || !data.items) return;
+          const body = document.getElementById("actions-body");
+          if (!body) return;
+          body.innerHTML = data.items.map(r => {{
+            const sourceClass = r.source === "local" ? "tag-local" : (r.source === "cas" ? "tag-cas" : "muted");
+            return "<tr>"
+              + "<td class='muted'>" + fmtTs(r.ts) + "</td>"
+              + "<td>" + r.chat_id + "</td>"
+              + "<td>" + r.user_id + "</td>"
+              + "<td>" + esc(r.action) + "</td>"
+              + "<td class='" + sourceClass + "'>" + esc(r.source || "unknown") + "</td>"
+              + "<td class='muted'>" + esc(r.reason || "") + "</td>"
+              + "</tr>";
+          }}).join("");
+        }})
+        .catch(() => {{}});
+    }}
+    function fmtStats(s) {{
+      return "total " + s.total + " | notify " + s.notify + " | quickban " + s.quickban
+        + " | local " + s.local + " | cas " + s.cas + " | unique " + s.unique;
+    }}
+    function esc(value) {{
+      return String(value || "").replace(/[&<>"']/g, function (m) {{
+        return {{
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;"
+        }}[m];
+      }});
+    }}
+    refreshSources();
+    refreshStats();
+    refreshActions();
+    setInterval(function () {{
+      refreshSources();
+      refreshStats();
+      refreshActions();
+    }}, 15000);
   </script>
 </body>
 </html>

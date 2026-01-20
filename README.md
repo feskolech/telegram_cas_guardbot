@@ -18,7 +18,7 @@ Anti-spam bot for Telegram groups with hybrid detection:
 - Stats:
   - /stats (24h / 7d / 30d counts)
 - CAS checks are cached for a short TTL to reduce API load.
-- Optional admin dashboard (read-only) with per-chat stats and recent actions.
+- Optional admin dashboard (read-only) with per-chat stats, recent actions, and source refresh times.
 
 ![Admin dashboard](docs/cas.png)
 
@@ -55,6 +55,7 @@ If `ADMIN_AUTH_MODE` includes `telegram`:
    - `ADMIN_TELEGRAM_BOT_TOKEN=` (optional, defaults to `BOT_TOKEN`)
    - `ADMIN_TELEGRAM_IDS=123,456` (allowed Telegram user IDs)
    - `ADMIN_SESSION_SECRET=...`
+   - `ADMIN_TELEGRAM_AUTH_MAX_AGE_SEC=86400` (max age of login payload)
 2) In BotFather, set domain: `/setdomain` to your `ADMIN_PUBLIC_URL` host.
 3) Open `https://your-domain/login` and authenticate.
 

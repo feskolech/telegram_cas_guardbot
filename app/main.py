@@ -56,6 +56,9 @@ async def main():
         try:
             total_ids, export_ids, lols_ids = await refresh_sources(session, local_db, cfg.http_timeout_seconds)
             log.info("Sources refreshed: total=%s export=%s lols=%s", total_ids, export_ids, lols_ids)
+            await db.upsert_source_update("export", export_ids)
+            await db.upsert_source_update("lols", lols_ids)
+            await db.upsert_source_update("total", total_ids)
         except Exception as e:
             log.exception("Failed to refresh sources: %s", e)
 

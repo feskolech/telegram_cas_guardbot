@@ -59,6 +59,12 @@ CREATE TABLE IF NOT EXISTS cas_cache (
   PRIMARY KEY (chat_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS source_updates (
+  name TEXT PRIMARY KEY,
+  last_ts INTEGER NOT NULL,
+  count INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS chat_info (
   chat_id INTEGER PRIMARY KEY,
   title TEXT NOT NULL,
@@ -294,6 +300,16 @@ class DB:
             "INSERT INTO chat_info(chat_id, title, updated_ts) VALUES(?, ?, ?) "
             "ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title, updated_ts=excluded.updated_ts",
             (chat_id, title, now),
+        )
+        await self.conn.commit()
+
+    async def upsert_source_update(self, name: str, count: int):
+        assert self.conn
+        now = int(time.time())
+        await self.conn.execute(
+            "INSERT INTO source_updates(name, last_ts, count) VALUES(?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET last_ts=excluded.last_ts, count=excluded.count",
+            (name, now, count),
         )
         await self.conn.commit()
 
