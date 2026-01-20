@@ -20,6 +20,8 @@ Anti-spam bot for Telegram groups with hybrid detection:
 - CAS checks are cached for a short TTL to reduce API load.
 - Optional admin dashboard (read-only) with per-chat stats and recent actions.
 
+![Admin dashboard](docs/cas.png)
+
 ## Requirements (Telegram)
 Bot must be admin with:
 - Ban users
@@ -42,6 +44,8 @@ BotFather -> /setprivacy -> Disable
    - `docker compose --profile admin up -d --build`
 3) Open: `http://<host>:9005/`
    - Send header: `Authorization: Bearer <ADMIN_TOKEN>`
+
+Note: The admin service is intended to run behind a reverse proxy (HTTPS). This is required for Telegram login and secure cookies. If you do not use Telegram login, you can access it directly on `http://<host>:9005/` with token auth.
 
 #### Telegram login (optional)
 If `ADMIN_AUTH_MODE` includes `telegram`:

@@ -271,16 +271,20 @@ def _verify_telegram_payload(payload: dict) -> bool:
 def login(request: Request):
     if not ADMIN_ENABLED:
         raise HTTPException(status_code=404, detail="Admin disabled")
-    if "telegram" not in _auth_modes():
-        raise HTTPException(status_code=404, detail="Telegram login disabled")
-    if not ADMIN_TELEGRAM_BOT_USERNAME:
-        return HTMLResponse("ADMIN_TELEGRAM_BOT_USERNAME is not set", status_code=503)
-    if not ADMIN_PUBLIC_URL:
-        return HTMLResponse("ADMIN_PUBLIC_URL is not set", status_code=503)
-    if not ADMIN_SESSION_SECRET:
-        return HTMLResponse("ADMIN_SESSION_SECRET is not set", status_code=503)
+    modes = _auth_modes()
+    if "telegram" not in modes and "token" not in modes:
+        raise HTTPException(status_code=404, detail="Login disabled")
+    if "telegram" in modes:
+        if not ADMIN_TELEGRAM_BOT_USERNAME:
+            return HTMLResponse("ADMIN_TELEGRAM_BOT_USERNAME is not set", status_code=503)
+        if not ADMIN_PUBLIC_URL:
+            return HTMLResponse("ADMIN_PUBLIC_URL is not set", status_code=503)
+        if not ADMIN_SESSION_SECRET:
+            return HTMLResponse("ADMIN_SESSION_SECRET is not set", status_code=503)
+    if "token" in modes and not ADMIN_TOKEN:
+        return HTMLResponse("ADMIN_TOKEN is not set", status_code=503)
     query = urlencode({"next": request.query_params.get("next", "/")})
-    auth_url = f"{ADMIN_PUBLIC_URL}/auth/telegram?{query}"
+    auth_url = f"{ADMIN_PUBLIC_URL}/auth/telegram?{query}" if "telegram" in modes else ""
     html = f"""
 <!DOCTYPE html>
 <html lang="en">
@@ -306,6 +310,27 @@ def login(request: Request):
       text-align: center;
       max-width: 420px;
     }}
+    form {{
+      display: grid;
+      gap: 12px;
+      margin-bottom: 16px;
+    }}
+    input[type="password"] {{
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid #223041;
+      background: #0f141b;
+      color: #e9eef5;
+    }}
+    button {{
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid #223041;
+      background: #18222d;
+      color: #e9eef5;
+      cursor: pointer;
+      font: inherit;
+    }}
     h1 {{
       margin: 0 0 8px;
       font-size: 22px;
@@ -320,13 +345,21 @@ def login(request: Request):
 <body>
   <div class="card">
     <h1>CAS Guard Admin</h1>
-    <p>Login with Telegram to access the dashboard.</p>
+    <p>Choose a login method to access the dashboard.</p>
+    {"""
+    <form action="/auth/token" method="post">
+      <input type="password" name="token" placeholder="Admin token" required>
+      <button type="submit">Login with token</button>
+    </form>
+    """ if "token" in modes else ""}
+    {"""
     <script async src="https://telegram.org/js/telegram-widget.js?22"
-      data-telegram-login="{ADMIN_TELEGRAM_BOT_USERNAME}"
+      data-telegram-login="%s"
       data-size="large"
       data-userpic="false"
-      data-auth-url="{auth_url}"
+      data-auth-url="%s"
       data-request-access="write"></script>
+    """ % (ADMIN_TELEGRAM_BOT_USERNAME, auth_url) if "telegram" in modes else ""}
   </div>
 </body>
 </html>
@@ -369,6 +402,32 @@ def auth_telegram(request: Request):
     return resp
 
 
+@app.post("/auth/token")
+async def auth_token(request: Request):
+    if not ADMIN_ENABLED:
+        raise HTTPException(status_code=404, detail="Admin disabled")
+    if "token" not in _auth_modes():
+        raise HTTPException(status_code=404, detail="Token login disabled")
+    form = await request.form()
+    token = (form.get("token") or "").strip()
+    if not token or token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    if not ADMIN_SESSION_SECRET:
+        raise HTTPException(status_code=503, detail="ADMIN_SESSION_SECRET not set")
+    issued_ts = int(time.time())
+    session_value = _sign_session(0, issued_ts)
+    resp = RedirectResponse(url="/", status_code=302)
+    resp.set_cookie(
+        "admin_session",
+        session_value,
+        httponly=True,
+        max_age=ADMIN_SESSION_TTL_SEC,
+        samesite="lax",
+        secure=True,
+    )
+    return resp
+
+
 @app.get("/logout")
 def logout(request: Request):
     if not ADMIN_ENABLED:
@@ -380,7 +439,12 @@ def logout(request: Request):
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
-    _require_auth(request)
+    try:
+        _require_auth(request)
+    except HTTPException as e:
+        if e.status_code in (401, 403):
+            return RedirectResponse(url="/login", status_code=302)
+        raise
     with _connect() as conn:
         chats = _list_chats(conn)
         day = _since(86400)
