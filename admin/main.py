@@ -740,6 +740,51 @@ def dashboard(request: Request):
     .tag-cas {{ color: var(--accent-2); }}
     .tag-err {{ color: var(--danger); }}
     .muted {{ color: var(--muted); }}
+    @media (max-width: 820px) {{
+      header {{
+        flex-direction: column;
+        align-items: flex-start;
+      }}
+      .grid {{
+        grid-template-columns: 1fr;
+        padding: 12px 16px 20px;
+      }}
+      .section {{
+        padding: 8px 16px 20px;
+      }}
+      .card {{
+        padding: 14px;
+      }}
+      table {{
+        display: block;
+        overflow-x: auto;
+        white-space: nowrap;
+      }}
+      .card .value {{
+        font-size: 16px;
+      }}
+      h1 {{
+        font-size: 24px;
+      }}
+    }}
+    @media (max-width: 520px) {{
+      .actions {{
+        width: 100%;
+        justify-content: flex-start;
+        flex-wrap: wrap;
+      }}
+      .actions a,
+      .actions button {{
+        width: auto;
+      }}
+      .pill {{
+        font-size: 11px;
+      }}
+      th, td {{
+        padding: 8px 6px;
+        font-size: 12px;
+      }}
+    }}
   </style>
 </head>
 <body>
