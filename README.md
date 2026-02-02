@@ -38,6 +38,28 @@ BotFather -> /setprivacy -> Disable
 1) Copy `.env.example` to `.env`, set BOT_TOKEN
 2) `docker compose up -d --build`
 
+### Run from GHCR image (optional)
+If you prefer pulling a prebuilt image:
+```bash
+docker pull ghcr.io/feskolech/telegram_cas_guardbot:latest
+```
+
+You can also use a fixed version tag (e.g. `v1.0.1`).
+
+Minimal `docker-compose` example:
+```yaml
+services:
+  bot:
+    image: ghcr.io/feskolech/telegram_cas_guardbot:latest
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+```
+
+If you use the admin dashboard, set `image:` for both `bot` and `admin` to the same tag.
+
 ### Admin dashboard (optional)
 1) Set in `.env`:
    - `ADMIN_ENABLED=true`
