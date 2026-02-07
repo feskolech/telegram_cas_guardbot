@@ -10,7 +10,8 @@ PRAGMA journal_mode=WAL;
 
 CREATE TABLE IF NOT EXISTS chat_settings (
   chat_id INTEGER PRIMARY KEY,
-  mode TEXT NOT NULL
+  mode TEXT NOT NULL,
+  silent INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS whitelist (
@@ -115,6 +116,7 @@ class DB:
             "UPDATE seen_users SET first_seen_ts=last_seen_ts WHERE first_seen_ts IS NULL"
         )
         await self._ensure_column("action_log", "source", "TEXT NOT NULL DEFAULT 'unknown'")
+        await self._ensure_column("chat_settings", "silent", "INTEGER NOT NULL DEFAULT 0")
         await self.conn.commit()
 
     async def _ensure_column(self, table: str, column: str, ddl: str):
@@ -136,6 +138,21 @@ class DB:
             "INSERT INTO chat_settings(chat_id, mode) VALUES(?, ?) "
             "ON CONFLICT(chat_id) DO UPDATE SET mode=excluded.mode",
             (chat_id, mode),
+        )
+        await self.conn.commit()
+
+    async def get_silent(self, chat_id: int) -> bool:
+        assert self.conn
+        cur = await self.conn.execute("SELECT silent FROM chat_settings WHERE chat_id=?", (chat_id,))
+        row = await cur.fetchone()
+        return bool(row[0]) if row else False
+
+    async def set_silent(self, chat_id: int, silent: bool):
+        assert self.conn
+        await self.conn.execute(
+            "INSERT INTO chat_settings(chat_id, mode, silent) VALUES(?, ?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET silent=excluded.silent",
+            (chat_id, MODE_QUICKBAN, int(bool(silent))),
         )
         await self.conn.commit()
 

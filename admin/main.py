@@ -210,13 +210,24 @@ def _recent_errors(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.Ro
 def _list_chats(conn: sqlite3.Connection) -> list[tuple[int, str | None]]:
     cur = conn.execute(
         """
-        SELECT a.chat_id AS chat_id, c.title AS title
+        SELECT a.chat_id AS chat_id, c.title AS title, s.mode AS mode, s.silent AS silent
         FROM (SELECT DISTINCT chat_id FROM action_log) a
         LEFT JOIN chat_info c ON a.chat_id=c.chat_id
+        LEFT JOIN chat_settings s ON a.chat_id=s.chat_id
         ORDER BY a.chat_id
         """
     )
-    return [(int(r["chat_id"]), r["title"]) for r in cur.fetchall()]
+    out = []
+    for r in cur.fetchall():
+        out.append(
+            (
+                int(r["chat_id"]),
+                r["title"],
+                r["mode"] if r["mode"] is not None else "quickban",
+                bool(r["silent"]) if r["silent"] is not None else False,
+            )
+        )
+    return out
 
 
 def _fmt_stats_line(stats: dict) -> str:
@@ -587,11 +598,13 @@ def dashboard(request: Request):
         source_updates = _get_source_updates(conn)
 
         per_chat = []
-        for chat_id, title in chats:
+        for chat_id, title, mode, silent in chats:
             per_chat.append(
                 {
                     "chat_id": chat_id,
                     "title": title or "-",
+                    "mode": mode,
+                    "silent": silent,
                     "day": _stats_for_chat(conn, chat_id, day),
                     "week": _stats_for_chat(conn, chat_id, week),
                     "month": _stats_for_chat(conn, chat_id, month),
@@ -836,6 +849,8 @@ def dashboard(request: Request):
         <tr>
           <th>Chat ID</th>
           <th>Title</th>
+          <th>Mode</th>
+          <th>Silent</th>
           <th>24h</th>
           <th>7d</th>
           <th>30d</th>
@@ -845,6 +860,8 @@ def dashboard(request: Request):
         {''.join(
             f"<tr><td><span class='pill'>{c['chat_id']}</span></td>"
             f"<td class='muted'>{_esc(c['title'])}</td>"
+            f"<td>{_esc(c['mode'])}</td>"
+            f"<td>{'on' if c['silent'] else 'off'}</td>"
             f"<td>{_fmt_stats_line(c['day'])}</td>"
             f"<td>{_fmt_stats_line(c['week'])}</td>"
             f"<td>{_fmt_stats_line(c['month'])}</td></tr>"

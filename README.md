@@ -12,6 +12,7 @@ What are CAS and lols.bot?
 - Per-chat modes:
   - /notify (report only)
   - /quickban (ban + delete cached messages)
+  - /silent (quickban only: ban + delete messages without sending a chat notification)
 - Updates sources every 30m (configurable)
 - Rechecks seen users every N (e.g. 15m)
 - Deduplicates actions per user (no repeated notifications/bans)

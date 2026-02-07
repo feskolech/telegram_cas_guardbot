@@ -128,15 +128,16 @@ async def act_on_spammer(
 
     await db.clear_cached_messages(chat_id, user_id)
 
-    try:
-        await bot.send_message(
-            chat_id,
-            msg_banned(full_name, user_id, reason),
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
-    except TelegramBadRequest as e:
-        await db.add_error_log("telegram", chat_id, user_id, f"{type(e).__name__}: {e}")
+    if not await db.get_silent(chat_id):
+        try:
+            await bot.send_message(
+                chat_id,
+                msg_banned(full_name, user_id, reason),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        except TelegramBadRequest as e:
+            await db.add_error_log("telegram", chat_id, user_id, f"{type(e).__name__}: {e}")
 
 @router.message(Command("notify"))
 async def cmd_notify(message: Message, bot: Bot, db: DB):
@@ -157,6 +158,27 @@ async def cmd_quickban(message: Message, bot: Bot, db: DB):
         return
     await db.set_mode(message.chat.id, MODE_QUICKBAN)
     await message.reply(msg_mode_set(MODE_QUICKBAN), parse_mode=ParseMode.HTML)
+
+@router.message(Command("silent"))
+async def cmd_silent(message: Message, bot: Bot, db: DB):
+    if not message.from_user:
+        return
+    if not await is_admin(bot, message.chat.id, message.from_user.id):
+        await message.reply(msg_not_admin())
+        return
+
+    mode = await db.get_mode(message.chat.id)
+    if mode != MODE_QUICKBAN:
+        await message.reply("⛔ /silent is available only in quickban mode.")
+        return
+
+    cur = await db.get_silent(message.chat.id)
+    new_val = not cur
+    await db.set_silent(message.chat.id, new_val)
+    await message.reply(
+        f"✅ Silent mode is now: <b>{'on' if new_val else 'off'}</b>",
+        parse_mode=ParseMode.HTML,
+    )
 
 @router.message(Command("unban"))
 async def cmd_unban(message: Message, bot: Bot, db: DB):
@@ -202,9 +224,11 @@ async def cmd_status(
         return
     chat_id = message.chat.id
     mode = await db.get_mode(chat_id)
+    silent = await db.get_silent(chat_id)
     text = (
         "🟢 Bot status: online\n"
         f"Mode: <b>{mode}</b>\n"
+        f"Silent: <b>{'on' if silent else 'off'}</b>\n"
         f"Local blacklist size: <b>{local_db.size()}</b>\n"
         f"Recheck interval: <b>{format_duration(recheck_interval_sec)}</b>\n"
         f"Source update: export={format_duration(update_export_interval_sec)}, lols={format_duration(update_lols_interval_sec)}\n"
