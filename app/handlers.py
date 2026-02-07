@@ -7,7 +7,7 @@ from aiogram.exceptions import TelegramBadRequest
 
 from .db import DB, MODE_NOTIFY, MODE_QUICKBAN
 from .texts import msg_notify, msg_banned, msg_mode_set, msg_unban_ok, msg_not_admin
-from .cas import CASClient
+from .cas import CASClient, CASCircuitOpen
 from .sources import LocalScamDB
 
 router = Router()
@@ -65,6 +65,8 @@ async def check_user(
 
     try:
         is_banned = await cas.is_banned(user_id)
+    except CASCircuitOpen:
+        return False, "", ""
     except Exception as e:
         await db.add_error_log("cas", chat_id, user_id, f"{type(e).__name__}: {e}")
         return False, "", ""

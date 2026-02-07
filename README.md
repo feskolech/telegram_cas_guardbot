@@ -39,6 +39,10 @@ BotFather -> /setprivacy -> Disable
 1) Copy `.env.example` to `.env`, set BOT_TOKEN
 2) `docker compose up -d --build`
 
+Tuning:
+- `HTTP_TIMEOUT_SECONDS` controls HTTP timeouts for CAS and source downloads.
+- `CAS_COOLDOWN_SEC` enables a simple circuit breaker for CAS API errors/timeouts.
+
 ### Run from GHCR image (optional)
 If you prefer pulling a prebuilt image:
 ```bash

@@ -38,7 +38,7 @@ async def main():
     local_db = LocalScamDB()
 
     session = aiohttp.ClientSession()
-    cas = CASClient(session, timeout_seconds=cfg.http_timeout_seconds)
+    cas = CASClient(session, timeout_seconds=cfg.http_timeout_seconds, cooldown_seconds=cfg.cas_cooldown_sec)
 
     # DI values for handlers
     dp.workflow_data["db"] = db
@@ -91,7 +91,10 @@ async def main():
                         try:
                             flagged = await cas.is_banned(user_id)
                         except Exception as e:
-                            await db.add_error_log("cas", chat_id, user_id, f"{type(e).__name__}: {e}")
+                            # CAS circuit breaker reduces repeated noise; only log real failures.
+                            from .cas import CASCircuitOpen
+                            if not isinstance(e, CASCircuitOpen):
+                                await db.add_error_log("cas", chat_id, user_id, f"{type(e).__name__}: {e}")
                             continue
                         await db.set_cas_cache(chat_id, user_id, flagged)
                         if not flagged:

@@ -42,6 +42,7 @@ class Config:
 
     http_timeout_seconds: int
     cas_cache_ttl_sec: int
+    cas_cooldown_sec: int
 
 def load_config() -> Config:
     return Config(
@@ -56,6 +57,7 @@ def load_config() -> Config:
         message_cache_limit=int(os.getenv("MESSAGE_CACHE_LIMIT", "50")),
         seen_ttl_days=int(os.getenv("SEEN_TTL_DAYS", "7")),
 
-        http_timeout_seconds=int(os.getenv("HTTP_TIMEOUT_SECONDS", "7")),
+        http_timeout_seconds=int(os.getenv("HTTP_TIMEOUT_SECONDS", "15")),
         cas_cache_ttl_sec=parse_duration(os.getenv("CAS_CACHE_TTL", "10m")),
+        cas_cooldown_sec=int(os.getenv("CAS_COOLDOWN_SEC", "60")),
     )
