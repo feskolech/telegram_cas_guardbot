@@ -94,7 +94,9 @@ async def main():
                             # CAS circuit breaker reduces repeated noise; only log real failures.
                             from .cas import CASCircuitOpen
                             if not isinstance(e, CASCircuitOpen):
-                                await db.add_error_log("cas", chat_id, user_id, f"{type(e).__name__}: {e}")
+                                msg = f"CAS down: {type(e).__name__}: {e}"
+                                if cas.should_log_failure(msg, interval_sec=60):
+                                    await db.add_error_log("cas", None, None, msg)
                             continue
                         await db.set_cas_cache(chat_id, user_id, flagged)
                         if not flagged:

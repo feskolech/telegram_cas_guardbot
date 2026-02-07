@@ -68,7 +68,9 @@ async def check_user(
     except CASCircuitOpen:
         return False, "", ""
     except Exception as e:
-        await db.add_error_log("cas", chat_id, user_id, f"{type(e).__name__}: {e}")
+        msg = f"CAS down: {type(e).__name__}: {e}"
+        if cas.should_log_failure(msg, interval_sec=60):
+            await db.add_error_log("cas", None, None, msg)
         return False, "", ""
 
     await db.set_cas_cache(chat_id, user_id, is_banned)

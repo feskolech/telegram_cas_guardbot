@@ -17,6 +17,24 @@ class CASClient:
         self.timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         self.cooldown_seconds = max(1, int(cooldown_seconds))
         self._down_until_ts = 0
+        self._last_failure_log_ts = 0
+        self._last_failure_sig = ""
+
+    def should_log_failure(self, message: str, interval_sec: int = 60) -> bool:
+        """
+        Best-effort in-process deduplication of CAS failure logs.
+        Logs at most once per interval, or immediately if failure signature changes.
+        """
+        now = int(time.time())
+        sig = (message or "")[:200]
+        if sig != self._last_failure_sig:
+            self._last_failure_sig = sig
+            self._last_failure_log_ts = now
+            return True
+        if now - self._last_failure_log_ts >= max(1, int(interval_sec)):
+            self._last_failure_log_ts = now
+            return True
+        return False
 
     async def is_banned(self, user_id: int) -> bool:
         now = int(time.time())
