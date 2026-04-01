@@ -8,6 +8,7 @@ from aiogram.exceptions import TelegramBadRequest
 from .db import DB, MODE_NOTIFY, MODE_QUICKBAN
 from .texts import msg_notify, msg_banned, msg_mode_set, msg_unban_ok, msg_not_admin
 from .cas import CASClient, CASCircuitOpen
+from .lols import LolsClient, LolsCircuitOpen
 from .sources import LocalScamDB
 
 router = Router()
@@ -46,17 +47,40 @@ async def check_user(
     chat_id: int,
     user_id: int,
     local_db: LocalScamDB,
+    lols: LolsClient,
     cas: CASClient,
     db: DB,
+    lols_cache_ttl_sec: int,
     cache_ttl_sec: int,
 ) -> tuple[bool, str, str]:
     """
     Returns (flagged, reason, source)
     """
     if local_db.contains(user_id):
-        return True, "Local blacklist (CAS export / lols)", "local"
+        return True, "CAS export blacklist", "export"
 
     now = int(time.time())
+    cached = await db.get_lols_cache(user_id)
+    if cached:
+        last_ts, is_banned = cached
+        if now - last_ts < lols_cache_ttl_sec:
+            return (True, "lols.bot API (record found)", "lols") if is_banned else (False, "", "")
+
+    try:
+        is_banned = await lols.is_banned(user_id)
+    except LolsCircuitOpen:
+        is_banned = False
+    except Exception as e:
+        msg = f"LOLS down: {type(e).__name__}: {e}"
+        if lols.should_log_failure(msg, interval_sec=60):
+            await db.add_error_log("lols", None, None, msg)
+        is_banned = False
+    else:
+        await db.set_lols_cache(user_id, is_banned)
+
+    if is_banned:
+        return True, "lols.bot API (record found)", "lols"
+
     cached = await db.get_cas_cache(chat_id, user_id)
     if cached:
         last_ts, is_banned = cached
@@ -219,10 +243,12 @@ async def cmd_status(
     bot: Bot,
     db: DB,
     local_db: LocalScamDB,
+    lols: LolsClient,
     recheck_interval_sec: int,
     update_export_interval_sec: int,
-    update_lols_interval_sec: int,
     seen_ttl_days: int,
+    lols_cache_ttl_sec: int,
+    cas_cache_ttl_sec: int,
 ):
     if not message.from_user:
         return
@@ -233,9 +259,11 @@ async def cmd_status(
         "🟢 Bot status: online\n"
         f"Mode: <b>{mode}</b>\n"
         f"Silent: <b>{'on' if silent else 'off'}</b>\n"
-        f"Local blacklist size: <b>{local_db.size()}</b>\n"
+        f"CAS export size: <b>{local_db.size()}</b>\n"
         f"Recheck interval: <b>{format_duration(recheck_interval_sec)}</b>\n"
-        f"Source update: export={format_duration(update_export_interval_sec)}, lols={format_duration(update_lols_interval_sec)}\n"
+        f"CAS export update: <b>{format_duration(update_export_interval_sec)}</b>\n"
+        f"LOLS cache TTL: <b>{format_duration(lols_cache_ttl_sec)}</b>\n"
+        f"CAS cache TTL: <b>{format_duration(cas_cache_ttl_sec)}</b>\n"
         f"Seen TTL: <b>{seen_ttl_days}d</b>"
     )
     await message.reply(text, parse_mode=ParseMode.HTML)
@@ -268,9 +296,11 @@ async def on_chat_member_update(
     bot: Bot,
     db: DB,
     cas: CASClient,
+    lols: LolsClient,
     local_db: LocalScamDB,
     cache_limit: int,
     banned_log_path: str,
+    lols_cache_ttl_sec: int,
     cas_cache_ttl_sec: int,
 ):
     # user joined becomes member/restricted
@@ -292,7 +322,16 @@ async def on_chat_member_update(
     if await db.is_actioned(chat_id, user_id):
         return
 
-    flagged, reason, source = await check_user(chat_id, user_id, local_db, cas, db, cas_cache_ttl_sec)
+    flagged, reason, source = await check_user(
+        chat_id,
+        user_id,
+        local_db,
+        lols,
+        cas,
+        db,
+        lols_cache_ttl_sec,
+        cas_cache_ttl_sec,
+    )
     if not flagged:
         return
 
@@ -316,9 +355,11 @@ async def on_any_message(
     bot: Bot,
     db: DB,
     cas: CASClient,
+    lols: LolsClient,
     local_db: LocalScamDB,
     cache_limit: int,
     banned_log_path: str,
+    lols_cache_ttl_sec: int,
     cas_cache_ttl_sec: int,
 ):
     chat_id = message.chat.id
@@ -337,7 +378,16 @@ async def on_any_message(
     if await db.is_actioned(chat_id, user_id):
         return
 
-    flagged, reason, source = await check_user(chat_id, user_id, local_db, cas, db, cas_cache_ttl_sec)
+    flagged, reason, source = await check_user(
+        chat_id,
+        user_id,
+        local_db,
+        lols,
+        cas,
+        db,
+        lols_cache_ttl_sec,
+        cas_cache_ttl_sec,
+    )
     if not flagged:
         return
 

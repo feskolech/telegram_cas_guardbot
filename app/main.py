@@ -10,9 +10,10 @@ from aiogram.enums import ParseMode
 from .config import load_config
 from .db import DB
 from .cas import CASClient
+from .lols import LolsClient
 from .sources import LocalScamDB, refresh_sources
 from .scheduler import run_periodic
-from .handlers import router
+from .handlers import router, check_user
 
 
 async def main():
@@ -38,26 +39,27 @@ async def main():
     local_db = LocalScamDB()
 
     session = aiohttp.ClientSession()
+    lols = LolsClient(session, timeout_seconds=cfg.http_timeout_seconds, cooldown_seconds=cfg.lols_cooldown_sec)
     cas = CASClient(session, timeout_seconds=cfg.http_timeout_seconds, cooldown_seconds=cfg.cas_cooldown_sec)
 
     # DI values for handlers
     dp.workflow_data["db"] = db
     dp.workflow_data["cas"] = cas
+    dp.workflow_data["lols"] = lols
     dp.workflow_data["local_db"] = local_db
     dp.workflow_data["cache_limit"] = cfg.message_cache_limit
     dp.workflow_data["banned_log_path"] = cfg.banned_log_path
     dp.workflow_data["recheck_interval_sec"] = cfg.recheck_interval_sec
     dp.workflow_data["update_export_interval_sec"] = cfg.update_export_interval_sec
-    dp.workflow_data["update_lols_interval_sec"] = cfg.update_lols_interval_sec
     dp.workflow_data["seen_ttl_days"] = cfg.seen_ttl_days
+    dp.workflow_data["lols_cache_ttl_sec"] = cfg.lols_cache_ttl_sec
     dp.workflow_data["cas_cache_ttl_sec"] = cfg.cas_cache_ttl_sec
 
     async def task_refresh_sources():
         try:
-            total_ids, export_ids, lols_ids = await refresh_sources(session, local_db, cfg.http_timeout_seconds)
-            log.info("Sources refreshed: total=%s export=%s lols=%s", total_ids, export_ids, lols_ids)
+            total_ids, export_ids = await refresh_sources(session, local_db, cfg.http_timeout_seconds)
+            log.info("Sources refreshed: total=%s export=%s", total_ids, export_ids)
             await db.upsert_source_update("export", export_ids)
-            await db.upsert_source_update("lols", lols_ids)
             await db.upsert_source_update("total", total_ids)
         except Exception as e:
             log.exception("Failed to refresh sources: %s", e)
@@ -78,30 +80,18 @@ async def main():
                 if await db.is_actioned(chat_id, user_id):
                     continue
 
-                flagged = local_db.contains(user_id)
-                source = "local" if flagged else ""
+                flagged, reason, source = await check_user(
+                    chat_id,
+                    user_id,
+                    local_db,
+                    lols,
+                    cas,
+                    db,
+                    cfg.lols_cache_ttl_sec,
+                    cfg.cas_cache_ttl_sec,
+                )
                 if not flagged:
-                    cached = await db.get_cas_cache(chat_id, user_id)
-                    if cached:
-                        last_ts, is_banned = cached
-                        if now - last_ts < cfg.cas_cache_ttl_sec:
-                            flagged = bool(is_banned)
-                            source = "cas" if flagged else ""
-                    if not flagged:
-                        try:
-                            flagged = await cas.is_banned(user_id)
-                        except Exception as e:
-                            # CAS circuit breaker reduces repeated noise; only log real failures.
-                            from .cas import CASCircuitOpen
-                            if not isinstance(e, CASCircuitOpen):
-                                msg = f"CAS down: {type(e).__name__}: {e}"
-                                if cas.should_log_failure(msg, interval_sec=60):
-                                    await db.add_error_log("cas", None, None, msg)
-                            continue
-                        await db.set_cas_cache(chat_id, user_id, flagged)
-                        if not flagged:
-                            continue
-                        source = "cas"
+                    continue
 
                 mode = await db.get_mode(chat_id)
 
@@ -111,8 +101,6 @@ async def main():
                     full_name = member.user.full_name or full_name
                 except Exception:
                     pass
-
-                reason = "Local blacklist (CAS export / lols)" if local_db.contains(user_id) else "CAS API (record found)"
 
                 from .handlers import act_on_spammer
                 await act_on_spammer(
@@ -133,8 +121,7 @@ async def main():
     log.info("Starting bot polling...")
     await task_refresh_sources()
 
-    update_interval = min(cfg.update_export_interval_sec, cfg.update_lols_interval_sec)
-    asyncio.create_task(run_periodic("refresh_sources", update_interval, task_refresh_sources))
+    asyncio.create_task(run_periodic("refresh_sources", cfg.update_export_interval_sec, task_refresh_sources))
     asyncio.create_task(run_periodic("recheck_seen", cfg.recheck_interval_sec, task_recheck_seen))
 
     try:

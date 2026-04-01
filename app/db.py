@@ -4,6 +4,7 @@ from typing import Optional
 
 MODE_NOTIFY = "notify"
 MODE_QUICKBAN = "quickban"
+GLOBAL_LOLS_CACHE_CHAT_ID = 0
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -60,6 +61,14 @@ CREATE TABLE IF NOT EXISTS cas_cache (
   PRIMARY KEY (chat_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS lols_cache (
+  chat_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  last_check_ts INTEGER NOT NULL,
+  is_banned INTEGER NOT NULL,
+  PRIMARY KEY (chat_id, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS source_updates (
   name TEXT PRIMARY KEY,
   last_ts INTEGER NOT NULL,
@@ -89,6 +98,9 @@ ON action_log(chat_id, ts);
 
 CREATE INDEX IF NOT EXISTS idx_cas_cache_ts
 ON cas_cache(last_check_ts);
+
+CREATE INDEX IF NOT EXISTS idx_lols_cache_ts
+ON lols_cache(last_check_ts);
 
 CREATE INDEX IF NOT EXISTS idx_error_log_ts
 ON error_log(ts);
@@ -198,6 +210,7 @@ class DB:
         await self.conn.execute("DELETE FROM seen_users WHERE last_seen_ts < ?", (min_ts,))
         await self.conn.execute("DELETE FROM acted_users WHERE action_ts < ?", (min_ts,))
         await self.conn.execute("DELETE FROM cas_cache WHERE last_check_ts < ?", (min_ts,))
+        await self.conn.execute("DELETE FROM lols_cache WHERE last_check_ts < ?", (min_ts,))
         await self.conn.commit()
 
     async def add_message_id(self, chat_id: int, user_id: int, message_id: int, limit: int):
@@ -348,5 +361,26 @@ class DB:
             "INSERT INTO cas_cache(chat_id, user_id, last_check_ts, is_banned) VALUES(?, ?, ?, ?) "
             "ON CONFLICT(chat_id, user_id) DO UPDATE SET last_check_ts=excluded.last_check_ts, is_banned=excluded.is_banned",
             (chat_id, user_id, now, int(is_banned)),
+        )
+        await self.conn.commit()
+
+    async def get_lols_cache(self, user_id: int) -> Optional[tuple[int, bool]]:
+        assert self.conn
+        cur = await self.conn.execute(
+            "SELECT last_check_ts, is_banned FROM lols_cache WHERE chat_id=? AND user_id=?",
+            (GLOBAL_LOLS_CACHE_CHAT_ID, user_id),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return None
+        return (int(row[0]), bool(row[1]))
+
+    async def set_lols_cache(self, user_id: int, is_banned: bool):
+        assert self.conn
+        now = int(time.time())
+        await self.conn.execute(
+            "INSERT INTO lols_cache(chat_id, user_id, last_check_ts, is_banned) VALUES(?, ?, ?, ?) "
+            "ON CONFLICT(chat_id, user_id) DO UPDATE SET last_check_ts=excluded.last_check_ts, is_banned=excluded.is_banned",
+            (GLOBAL_LOLS_CACHE_CHAT_ID, user_id, now, int(is_banned)),
         )
         await self.conn.commit()

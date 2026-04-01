@@ -35,12 +35,13 @@ class Config:
 
     recheck_interval_sec: int
     update_export_interval_sec: int
-    update_lols_interval_sec: int
 
     message_cache_limit: int
     seen_ttl_days: int
 
     http_timeout_seconds: int
+    lols_cache_ttl_sec: int
+    lols_cooldown_sec: int
     cas_cache_ttl_sec: int
     cas_cooldown_sec: int
 
@@ -52,12 +53,13 @@ def load_config() -> Config:
 
         recheck_interval_sec=parse_duration(os.getenv("RECHECK_INTERVAL", "15m")),
         update_export_interval_sec=parse_duration(os.getenv("UPDATE_EXPORT_INTERVAL", "30m")),
-        update_lols_interval_sec=parse_duration(os.getenv("UPDATE_LOLS_INTERVAL", "30m")),
 
         message_cache_limit=int(os.getenv("MESSAGE_CACHE_LIMIT", "50")),
         seen_ttl_days=int(os.getenv("SEEN_TTL_DAYS", "7")),
 
         http_timeout_seconds=int(os.getenv("HTTP_TIMEOUT_SECONDS", "15")),
+        lols_cache_ttl_sec=parse_duration(os.getenv("LOLS_CACHE_TTL", "1h")),
+        lols_cooldown_sec=int(os.getenv("LOLS_COOLDOWN_SEC", "60")),
         cas_cache_ttl_sec=parse_duration(os.getenv("CAS_CACHE_TTL", "10m")),
         cas_cooldown_sec=int(os.getenv("CAS_COOLDOWN_SEC", "60")),
     )

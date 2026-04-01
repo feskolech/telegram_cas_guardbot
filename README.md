@@ -1,19 +1,20 @@
 # TG CAS Guard Bot
 
 Anti-spam bot for Telegram groups with hybrid detection:
-- Local blacklists (CAS export.csv + lols.bot scammers.txt)
-- CAS API check on demand
+- Local blacklist from CAS `export.csv`
+- On-demand lols.bot API check
+- On-demand CAS API check
 
 What are CAS and lols.bot?
 - CAS (Combot Anti-Spam) is a shared blacklist of known spam accounts.
-- lols.bot provides a public list of scammer IDs.
+- lols.bot provides an account reputation API.
 
 ## Features
 - Per-chat modes:
   - /notify (report only)
   - /quickban (ban + delete cached messages)
-  - /silent (quickban only: ban + delete messages without sending a chat notification)
-- Updates sources every 30m (configurable)
+- /silent (quickban only: ban + delete messages without sending a chat notification)
+- Refreshes CAS export every 30m (configurable)
 - Rechecks seen users every N (e.g. 15m)
 - Deduplicates actions per user (no repeated notifications/bans)
 - Whitelist/unban:
@@ -22,7 +23,7 @@ What are CAS and lols.bot?
   - /status (bot status, mode, intervals, local DB size)
 - Stats:
   - /stats (24h / 7d / 30d counts)
-- CAS checks are cached for a short TTL to reduce API load.
+- LOLS and CAS checks are cached for a short TTL to reduce API load.
 - Optional admin dashboard (read-only) with per-chat stats, recent actions, and source refresh times.
 
 ![Admin dashboard](docs/cas.png)
@@ -40,8 +41,9 @@ BotFather -> /setprivacy -> Disable
 2) `docker compose up -d --build`
 
 Tuning:
-- `HTTP_TIMEOUT_SECONDS` controls HTTP timeouts for CAS and source downloads.
-- `CAS_COOLDOWN_SEC` enables a simple circuit breaker for CAS API errors/timeouts.
+- `HTTP_TIMEOUT_SECONDS` controls HTTP timeouts for CAS, LOLS, and source downloads.
+- `LOLS_CACHE_TTL` / `CAS_CACHE_TTL` control API cache TTLs.
+- `LOLS_COOLDOWN_SEC` / `CAS_COOLDOWN_SEC` enable simple circuit breakers for API errors/timeouts.
 
 ### Run from GHCR image (optional)
 If you prefer pulling a prebuilt image:

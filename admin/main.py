@@ -24,7 +24,6 @@ ADMIN_SESSION_TTL_SEC = int(os.getenv("ADMIN_SESSION_TTL_SEC", "43200"))
 ADMIN_PUBLIC_URL = os.getenv("ADMIN_PUBLIC_URL", "").strip().rstrip("/")
 ADMIN_TELEGRAM_AUTH_MAX_AGE_SEC = int(os.getenv("ADMIN_TELEGRAM_AUTH_MAX_AGE_SEC", "86400"))
 UPDATE_EXPORT_INTERVAL = os.getenv("UPDATE_EXPORT_INTERVAL", "30m")
-UPDATE_LOLS_INTERVAL = os.getenv("UPDATE_LOLS_INTERVAL", "30m")
 
 app = FastAPI()
 
@@ -123,7 +122,8 @@ def _stats_for_chat(conn: sqlite3.Connection, chat_id: int, since_ts: int) -> di
           COUNT(*) AS total,
           SUM(CASE WHEN action='notify' THEN 1 ELSE 0 END) AS notify_count,
           SUM(CASE WHEN action='quickban' THEN 1 ELSE 0 END) AS quickban_count,
-          SUM(CASE WHEN source='local' THEN 1 ELSE 0 END) AS local_count,
+          SUM(CASE WHEN source IN ('export', 'local') THEN 1 ELSE 0 END) AS export_count,
+          SUM(CASE WHEN source='lols' THEN 1 ELSE 0 END) AS lols_count,
           SUM(CASE WHEN source='cas' THEN 1 ELSE 0 END) AS cas_count,
           COUNT(DISTINCT user_id) AS unique_users
         FROM action_log
@@ -136,7 +136,8 @@ def _stats_for_chat(conn: sqlite3.Connection, chat_id: int, since_ts: int) -> di
         "total": int(row["total"] or 0),
         "notify": int(row["notify_count"] or 0),
         "quickban": int(row["quickban_count"] or 0),
-        "local": int(row["local_count"] or 0),
+        "export": int(row["export_count"] or 0),
+        "lols": int(row["lols_count"] or 0),
         "cas": int(row["cas_count"] or 0),
         "unique": int(row["unique_users"] or 0),
     }
@@ -149,7 +150,8 @@ def _stats_all(conn: sqlite3.Connection, since_ts: int) -> dict:
           COUNT(*) AS total,
           SUM(CASE WHEN action='notify' THEN 1 ELSE 0 END) AS notify_count,
           SUM(CASE WHEN action='quickban' THEN 1 ELSE 0 END) AS quickban_count,
-          SUM(CASE WHEN source='local' THEN 1 ELSE 0 END) AS local_count,
+          SUM(CASE WHEN source IN ('export', 'local') THEN 1 ELSE 0 END) AS export_count,
+          SUM(CASE WHEN source='lols' THEN 1 ELSE 0 END) AS lols_count,
           SUM(CASE WHEN source='cas' THEN 1 ELSE 0 END) AS cas_count,
           COUNT(DISTINCT user_id) AS unique_users
         FROM action_log
@@ -162,7 +164,8 @@ def _stats_all(conn: sqlite3.Connection, since_ts: int) -> dict:
         "total": int(row["total"] or 0),
         "notify": int(row["notify_count"] or 0),
         "quickban": int(row["quickban_count"] or 0),
-        "local": int(row["local_count"] or 0),
+        "export": int(row["export_count"] or 0),
+        "lols": int(row["lols_count"] or 0),
         "cas": int(row["cas_count"] or 0),
         "unique": int(row["unique_users"] or 0),
     }
@@ -233,13 +236,15 @@ def _list_chats(conn: sqlite3.Connection) -> list[tuple[int, str | None]]:
 def _fmt_stats_line(stats: dict) -> str:
     return (
         f"total {stats['total']} | notify {stats['notify']} | quickban {stats['quickban']} | "
-        f"local {stats['local']} | cas {stats['cas']} | unique {stats['unique']}"
+        f"export {stats['export']} | lols {stats['lols']} | cas {stats['cas']} | unique {stats['unique']}"
     )
 
 
 def _source_class(source: str) -> str:
-    if source == "local":
-        return "tag-local"
+    if source in {"export", "local"}:
+        return "tag-export"
+    if source == "lols":
+        return "tag-lols"
     if source == "cas":
         return "tag-cas"
     return "muted"
@@ -253,7 +258,6 @@ def healthz():
 def api_sources(request: Request):
     _require_auth(request)
     export_interval = _parse_duration(UPDATE_EXPORT_INTERVAL) or 1800
-    lols_interval = _parse_duration(UPDATE_LOLS_INTERVAL) or 1800
     with _connect() as conn:
         updates = _get_source_updates(conn)
     def _pack(name: str, interval: int) -> dict:
@@ -264,11 +268,10 @@ def api_sources(request: Request):
         return {"last_ts": last_ts, "next_ts": next_ts, "count": count}
     return {
         "export": _pack("export", export_interval),
-        "lols": _pack("lols", lols_interval),
+        "lols": {"mode": "on-demand"},
         "total": _pack("total", 0),
         "server_ts": int(time.time()),
         "export_interval_sec": export_interval,
-        "lols_interval_sec": lols_interval,
     }
 
 
@@ -749,7 +752,8 @@ def dashboard(request: Request):
       color: #40505f;
       border-color: #d3dde6;
     }}
-    .tag-local {{ color: var(--accent); }}
+    .tag-export {{ color: var(--accent); }}
+    .tag-lols {{ color: #7fc46b; }}
     .tag-cas {{ color: var(--accent-2); }}
     .tag-err {{ color: var(--danger); }}
     .muted {{ color: var(--muted); }}
@@ -833,11 +837,11 @@ def dashboard(request: Request):
       <h3>Sources</h3>
       <div class="value" id="sources-meta">
         Export: {_esc(_fmt_ts(source_updates.get("export", {}).get("last_ts")))}<br>
-        LOLS: {_esc(_fmt_ts(source_updates.get("lols", {}).get("last_ts")))}<br>
-        Total IDs: {_esc(source_updates.get("total", {}).get("count", "-"))}
+        LOLS: on-demand API lookup<br>
+        Total export IDs: {_esc(source_updates.get("total", {}).get("count", "-"))}
       </div>
       <div class="muted" id="sources-next">
-        Next export: - · Next lols: -
+        Next export: -
       </div>
     </div>
   </div>
@@ -952,19 +956,16 @@ def dashboard(request: Request):
         .then(data => {{
           if (!data) return;
           const exportLast = fmtTs(data.export.last_ts);
-          const lolsLast = fmtTs(data.lols.last_ts);
           const total = data.total.count ?? "-";
           const exportNextTs = data.export.next_ts ?? (data.export.last_ts && data.export_interval_sec ? data.export.last_ts + data.export_interval_sec : null);
-          const lolsNextTs = data.lols.next_ts ?? (data.lols.last_ts && data.lols_interval_sec ? data.lols.last_ts + data.lols_interval_sec : null);
           const exportNext = fmtTs(exportNextTs);
-          const lolsNext = fmtTs(lolsNextTs);
           const meta = document.getElementById("sources-meta");
           const next = document.getElementById("sources-next");
           if (meta) {{
-            meta.innerHTML = "Export: " + exportLast + "<br>LOLS: " + lolsLast + "<br>Total IDs: " + total;
+            meta.innerHTML = "Export: " + exportLast + "<br>LOLS: on-demand API lookup<br>Total export IDs: " + total;
           }}
           if (next) {{
-            next.innerHTML = "Next export: " + exportNext + "<br>Next lols: " + lolsNext;
+            next.innerHTML = "Next export: " + exportNext;
           }}
         }})
         .catch(() => {{}});
@@ -991,7 +992,8 @@ def dashboard(request: Request):
           const body = document.getElementById("actions-body");
           if (!body) return;
           body.innerHTML = data.items.map(r => {{
-            const sourceClass = r.source === "local" ? "tag-local" : (r.source === "cas" ? "tag-cas" : "muted");
+            const sourceClass = (r.source === "export" || r.source === "local") ? "tag-export"
+              : (r.source === "lols" ? "tag-lols" : (r.source === "cas" ? "tag-cas" : "muted"));
             return "<tr>"
               + "<td class='muted'>" + fmtTs(r.ts) + "</td>"
               + "<td>" + r.chat_id + "</td>"
@@ -1006,7 +1008,7 @@ def dashboard(request: Request):
     }}
     function fmtStats(s) {{
       return "total " + s.total + " | notify " + s.notify + " | quickban " + s.quickban
-        + " | local " + s.local + " | cas " + s.cas + " | unique " + s.unique;
+        + " | export " + s.export + " | lols " + s.lols + " | cas " + s.cas + " | unique " + s.unique;
     }}
     function esc(value) {{
       return String(value || "").replace(/[&<>"']/g, function (m) {{
