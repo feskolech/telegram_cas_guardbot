@@ -3,7 +3,7 @@ import tempfile
 import unittest
 
 from app.db import DB
-from app.handlers import check_user
+from app.handlers import _parse_check_target, check_user, inspect_user
 from app.lols import LolsClient, LolsUnavailable
 
 
@@ -79,6 +79,22 @@ class FakeSession:
         return self.response
 
 
+class StubUser:
+    def __init__(self, user_id: int):
+        self.id = user_id
+
+
+class StubReply:
+    def __init__(self, user_id: int):
+        self.from_user = StubUser(user_id)
+
+
+class StubMessage:
+    def __init__(self, text: str, reply_user_id=None):
+        self.text = text
+        self.reply_to_message = StubReply(reply_user_id) if reply_user_id is not None else None
+
+
 class CheckUserTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         fd, self.db_path = tempfile.mkstemp(suffix=".sqlite3")
@@ -130,6 +146,55 @@ class CheckUserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source, "cas")
         self.assertEqual(lols.calls, [99])
         self.assertEqual(cas.calls, [99])
+
+    async def test_inspect_user_reports_all_sources(self):
+        await self.db.set_lols_cache(501, True)
+        local_db = FakeLocalDB({501})
+        lols = FakeLolsClient(result=False)
+        cas = FakeCasClient(result=False)
+
+        result = await inspect_user(100, 501, local_db, lols, cas, self.db, 3600, 600)
+
+        self.assertTrue(result["export_hit"])
+        self.assertEqual(result["lols"]["state"], "banned")
+        self.assertTrue(result["lols"]["cached"])
+        self.assertEqual(result["cas"]["state"], "clear")
+        self.assertEqual(result["final_source"], "export")
+        self.assertEqual(result["would_act"], True)
+
+    async def test_inspect_user_marks_unavailable_sources(self):
+        local_db = FakeLocalDB()
+        lols = FakeLolsClient(error=RuntimeError("lols down"))
+        cas = FakeCasClient(error=RuntimeError("cas down"))
+
+        result = await inspect_user(100, 777, local_db, lols, cas, self.db, 3600, 600)
+
+        self.assertFalse(result["flagged"])
+        self.assertTrue(result["inconclusive"])
+        self.assertEqual(result["lols"]["state"], "unavailable")
+        self.assertIn("lols down", result["lols"]["detail"])
+        self.assertEqual(result["cas"]["state"], "unavailable")
+        self.assertIn("cas down", result["cas"]["detail"])
+
+
+class CheckTargetParsingTests(unittest.TestCase):
+    def test_parse_check_target_from_argument(self):
+        target_id, error_text = _parse_check_target(StubMessage("/check 12345"))
+
+        self.assertEqual(target_id, 12345)
+        self.assertIsNone(error_text)
+
+    def test_parse_check_target_from_reply(self):
+        target_id, error_text = _parse_check_target(StubMessage("/check", reply_user_id=777))
+
+        self.assertEqual(target_id, 777)
+        self.assertIsNone(error_text)
+
+    def test_parse_check_target_rejects_invalid_ids(self):
+        target_id, error_text = _parse_check_target(StubMessage("/check -5"))
+
+        self.assertIsNone(target_id)
+        self.assertIn("Usage", error_text)
 
 
 class LolsClientTests(unittest.IsolatedAsyncioTestCase):

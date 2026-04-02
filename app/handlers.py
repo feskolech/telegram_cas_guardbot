@@ -1,3 +1,4 @@
+import html
 import time
 from aiogram import Router, F, Bot
 from aiogram.types import Message, ChatMemberUpdated
@@ -12,6 +13,41 @@ from .lols import LolsClient, LolsCircuitOpen
 from .sources import LocalScamDB
 
 router = Router()
+
+
+def _source_result(state: str, cached: bool = False, detail: str = "") -> dict:
+    return {"state": state, "cached": cached, "detail": detail}
+
+
+def _parse_check_target(message: Message):
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) > 1:
+        try:
+            target_id = int(parts[1].strip())
+        except ValueError:
+            return None, "Usage: /check <userid> or reply with /check"
+        if target_id <= 0:
+            return None, "Usage: /check <userid> or reply with /check"
+        return target_id, None
+
+    reply = message.reply_to_message
+    if reply and reply.from_user:
+        if reply.from_user.id > 0:
+            return reply.from_user.id, None
+
+    return None, "Usage: /check <userid> or reply with /check"
+
+
+def _format_check_source(label: str, result: dict) -> str:
+    state = result["state"]
+    if state == "banned":
+        suffix = "cache" if result["cached"] else "live"
+        return f"{label}: <b>banned</b> ({suffix})"
+    if state == "clear":
+        suffix = "cache" if result["cached"] else "live"
+        return f"{label}: <b>clear</b> ({suffix})"
+    detail = html.escape(result.get("detail") or "unavailable")
+    return f"{label}: <b>unavailable</b> ({detail})"
 
 def append_audit_line(log_path: str, chat_id: int, user_id: int, full_name: str, mode: str, reason: str, action: str):
     """
@@ -59,48 +95,117 @@ async def check_user(
     if local_db.contains(user_id):
         return True, "CAS export blacklist", "export"
 
+    lols_result = await _check_lols_source(user_id, lols, db, lols_cache_ttl_sec, log_errors=True)
+    if lols_result["state"] == "banned":
+        return True, "lols.bot API (record found)", "lols"
+
+    cas_result = await _check_cas_source(chat_id, user_id, cas, db, cache_ttl_sec, log_errors=True)
+    if cas_result["state"] == "banned":
+        return True, "CAS API (record found)", "cas"
+    return False, "", ""
+
+
+async def _check_lols_source(
+    user_id: int,
+    lols: LolsClient,
+    db: DB,
+    cache_ttl_sec: int,
+    log_errors: bool,
+) -> dict:
     now = int(time.time())
     cached = await db.get_lols_cache(user_id)
     if cached:
         last_ts, is_banned = cached
-        if now - last_ts < lols_cache_ttl_sec:
-            return (True, "lols.bot API (record found)", "lols") if is_banned else (False, "", "")
+        if now - last_ts < cache_ttl_sec:
+            return _source_result("banned" if is_banned else "clear", cached=True)
 
     try:
         is_banned = await lols.is_banned(user_id)
     except LolsCircuitOpen:
-        is_banned = False
+        return _source_result("unavailable", detail="cooldown active")
     except Exception as e:
         msg = f"LOLS down: {type(e).__name__}: {e}"
-        if lols.should_log_failure(msg, interval_sec=60):
+        if log_errors and lols.should_log_failure(msg, interval_sec=60):
             await db.add_error_log("lols", None, None, msg)
-        is_banned = False
+        return _source_result("unavailable", detail=msg)
     else:
         await db.set_lols_cache(user_id, is_banned)
+        return _source_result("banned" if is_banned else "clear", cached=False)
 
-    if is_banned:
-        return True, "lols.bot API (record found)", "lols"
-
+async def _check_cas_source(
+    chat_id: int,
+    user_id: int,
+    cas: CASClient,
+    db: DB,
+    cache_ttl_sec: int,
+    log_errors: bool,
+) -> dict:
+    now = int(time.time())
     cached = await db.get_cas_cache(chat_id, user_id)
     if cached:
         last_ts, is_banned = cached
         if now - last_ts < cache_ttl_sec:
-            return (True, "CAS API (record found)", "cas") if is_banned else (False, "", "")
+            return _source_result("banned" if is_banned else "clear", cached=True)
 
     try:
         is_banned = await cas.is_banned(user_id)
     except CASCircuitOpen:
-        return False, "", ""
+        return _source_result("unavailable", detail="cooldown active")
     except Exception as e:
         msg = f"CAS down: {type(e).__name__}: {e}"
-        if cas.should_log_failure(msg, interval_sec=60):
+        if log_errors and cas.should_log_failure(msg, interval_sec=60):
             await db.add_error_log("cas", None, None, msg)
-        return False, "", ""
+        return _source_result("unavailable", detail=msg)
 
     await db.set_cas_cache(chat_id, user_id, is_banned)
-    if is_banned:
-        return True, "CAS API (record found)", "cas"
-    return False, "", ""
+    return _source_result("banned" if is_banned else "clear", cached=False)
+
+
+async def inspect_user(
+    chat_id: int,
+    user_id: int,
+    local_db: LocalScamDB,
+    lols: LolsClient,
+    cas: CASClient,
+    db: DB,
+    lols_cache_ttl_sec: int,
+    cas_cache_ttl_sec: int,
+) -> dict:
+    export_hit = local_db.contains(user_id)
+    lols_result = await _check_lols_source(user_id, lols, db, lols_cache_ttl_sec, log_errors=False)
+    cas_result = await _check_cas_source(chat_id, user_id, cas, db, cas_cache_ttl_sec, log_errors=False)
+    whitelisted = await db.is_whitelisted(chat_id, user_id)
+    actioned = await db.is_actioned(chat_id, user_id)
+
+    flagged = export_hit or lols_result["state"] == "banned" or cas_result["state"] == "banned"
+    inconclusive = (not flagged) and (
+        lols_result["state"] == "unavailable" or cas_result["state"] == "unavailable"
+    )
+    final_source = ""
+    final_reason = ""
+    if export_hit:
+        final_source = "export"
+        final_reason = "CAS export blacklist"
+    elif lols_result["state"] == "banned":
+        final_source = "lols"
+        final_reason = "lols.bot API (record found)"
+    elif cas_result["state"] == "banned":
+        final_source = "cas"
+        final_reason = "CAS API (record found)"
+
+    return {
+        "user_id": user_id,
+        "export_hit": export_hit,
+        "lols": lols_result,
+        "cas": cas_result,
+        "whitelisted": whitelisted,
+        "actioned": actioned,
+        "flagged": flagged,
+        "inconclusive": inconclusive,
+        "final_source": final_source,
+        "final_reason": final_reason,
+        "would_act": flagged and not whitelisted and not actioned,
+    }
 
 async def act_on_spammer(
     bot: Bot,
@@ -236,6 +341,64 @@ async def cmd_unban(message: Message, bot: Bot, db: DB):
         pass
 
     await message.reply(msg_unban_ok(target_id), parse_mode=ParseMode.HTML)
+
+
+@router.message(Command("check"))
+async def cmd_check(
+    message: Message,
+    bot: Bot,
+    db: DB,
+    local_db: LocalScamDB,
+    lols: LolsClient,
+    cas: CASClient,
+    lols_cache_ttl_sec: int,
+    cas_cache_ttl_sec: int,
+):
+    if not message.from_user:
+        return
+    if not await is_admin(bot, message.chat.id, message.from_user.id):
+        await message.reply(msg_not_admin())
+        return
+
+    target_id, error_text = _parse_check_target(message)
+    if error_text:
+        await message.reply(error_text)
+        return
+
+    result = await inspect_user(
+        message.chat.id,
+        target_id,
+        local_db,
+        lols,
+        cas,
+        db,
+        lols_cache_ttl_sec,
+        cas_cache_ttl_sec,
+    )
+
+    if result["flagged"]:
+        detection = f"<b>flagged</b> via <b>{html.escape(result['final_source'])}</b>"
+        reason = html.escape(result["final_reason"])
+    elif result["inconclusive"]:
+        detection = "<b>inconclusive</b>"
+        reason = "one or more remote sources are unavailable"
+    else:
+        detection = "<b>clean</b>"
+        reason = "-"
+
+    text = (
+        "🔎 Check result\n"
+        f"User: <code>{target_id}</code>\n"
+        f"Detection: {detection}\n"
+        f"Reason: <b>{reason}</b>\n"
+        f"Whitelisted: <b>{'yes' if result['whitelisted'] else 'no'}</b>\n"
+        f"Already actioned: <b>{'yes' if result['actioned'] else 'no'}</b>\n"
+        f"Would act now: <b>{'yes' if result['would_act'] else 'no'}</b>\n"
+        f"CAS export: <b>{'match' if result['export_hit'] else 'clear'}</b>\n"
+        f"{_format_check_source('LOLS', result['lols'])}\n"
+        f"{_format_check_source('CAS', result['cas'])}"
+    )
+    await message.reply(text, parse_mode=ParseMode.HTML)
 
 @router.message(Command("status"))
 async def cmd_status(

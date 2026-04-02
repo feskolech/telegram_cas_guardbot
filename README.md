@@ -19,6 +19,8 @@ What are CAS and lols.bot?
 - Deduplicates actions per user (no repeated notifications/bans)
 - Whitelist/unban:
   - /unban <userid> (adds to whitelist for this chat + tries to unban)
+- Manual diagnostics:
+  - /check <userid> (or reply with /check to inspect export, LOLS, CAS, whitelist, and action state)
 - Status:
   - /status (bot status, mode, intervals, local DB size)
 - Stats:
