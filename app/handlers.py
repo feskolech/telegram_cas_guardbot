@@ -346,7 +346,6 @@ async def cmd_unban(message: Message, bot: Bot, db: DB):
 @router.message(Command("check"))
 async def cmd_check(
     message: Message,
-    bot: Bot,
     db: DB,
     local_db: LocalScamDB,
     lols: LolsClient,
@@ -355,9 +354,6 @@ async def cmd_check(
     cas_cache_ttl_sec: int,
 ):
     if not message.from_user:
-        return
-    if not await is_admin(bot, message.chat.id, message.from_user.id):
-        await message.reply(msg_not_admin())
         return
 
     target_id, error_text = _parse_check_target(message)
